@@ -26,7 +26,7 @@ def wait_for(check, description):
 class Relay(BaseHTTPRequestHandler):
     joined = []
     user = {"id": "listener", "name": "Listener", "color": 8}
-    room = {"id": "test-text", "kind": "text", "name": "general"}
+    room = {"id": "ChatRoom0001", "kind": "text", "name": "general"}
 
     def log_message(self, *args):
         pass
@@ -174,6 +174,8 @@ if __name__ == "__main__":
     with ThreadingHTTPServer(("127.0.0.1", 0), Relay) as server:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         os.environ["KANAL_DEMO_ADDRESS"] = f"http://127.0.0.1:{server.server_port}"
-        test(Path(sys.argv[1]).resolve())
-        server.shutdown()
+        try:
+            test(Path(sys.argv[1]).resolve())
+        finally:
+            server.shutdown()
     print("Passed cold/warm Windows URL activation, code-only joining, chat focus, drag, wheel and typing.")
