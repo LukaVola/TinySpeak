@@ -2,13 +2,14 @@
 
 TinySpeak is a portable voice and text chat app for small groups on 64-bit Windows. Your PC hosts the server while TinySpeak is open. You and your friends only need a username and an invite.
 
-**[Download Patch 13 for Windows x64 (ZIP)](https://github.com/LukaVola/TinySpeak/releases/download/patch-13/TinySpeak-Windows-x64.zip)**
+**[Download Patch 14 for Windows x64 (ZIP)](https://github.com/LukaVola/TinySpeak/releases/download/patch-14/TinySpeak-Windows-x64.zip)**
 
 ## Start a conversation
 
 1. Download the Windows ZIP above and extract the entire **TinySpeak** folder somewhere you can write to. Open **Launch TinySpeak.exe**. The ZIP includes the voice libraries, host and Windows C++ runtime files.
 2. To host, choose **New server**, then **Menu → Copy invite code**. Send the full code to your friends. For Internet invites, everyone should use Patch 12 or newer.
-3. To join, open TinySpeak, click **Join** and paste the code. Double-click the same voice room to talk. The microphone button controls mute. Press **Enter** to send a text message.
+3. To join with a code, open TinySpeak, click **Join** and paste the complete code. With **Menu → Copy invite link**, you can instead send a `tinyspeak://` link. Clicking the link in a compatible app opens TinySpeak and joins the server. Each person opens TinySpeak once after extracting it so Windows can register the link for their account. A browser may ask for confirmation before opening an external app.
+4. Double-click the same voice room to talk. The microphone button controls mute. Read or scroll through the channel history, then type in the message box at the bottom and press **Enter** to send.
 
 TinySpeak runs as a standard Windows user. **TinySpeak Host.exe** runs the rooms, chat and voice on the owner's PC. **TinySpeak Link.exe** connects peers over the Internet. Windows Firewall may ask about network access. When updating, close TinySpeak and extract the new version over the same folder.
 

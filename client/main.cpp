@@ -59,11 +59,17 @@ std::string parseCode(const std::wstring& value) {
     auto begin = text.find_first_not_of(" \t\r\n");
     if (begin == std::string::npos) return {};
     text = text.substr(begin, text.find_last_not_of(" \t\r\n") - begin + 1);
-    constexpr std::string_view current = "tinyspeak://join/";
-    constexpr std::string_view legacy = "kanal://join/";
-    if (text.starts_with(current)) text.erase(0, current.size());
-    else if (text.starts_with(legacy)) text.erase(0, legacy.size());
     return validCode(text) || hostedInvite(text) ? text : "";
+}
+
+std::string parseInviteLink(std::wstring_view link) {
+    for (std::wstring_view prefix : {L"tinyspeak://join/", L"kanal://join/"}) {
+        if (link.size() <= prefix.size() || link.size() > prefix.size() + 254 ||
+            _wcsnicmp(link.data(), prefix.data(), prefix.size()) != 0) continue;
+        const auto code = utf8(std::wstring(link.substr(prefix.size())));
+        return validCode(code) || hostedInvite(code) ? code : std::string{};
+    }
+    return {};
 }
 
 Json loadJson(const fs::path& file) {
@@ -113,19 +119,26 @@ bool registerInviteLink() {
     if (!size || size >= std::size(exe)) return false;
     HKEY key = nullptr;
     constexpr wchar_t root[] = L"Software\\Classes\\tinyspeak";
+    constexpr wchar_t commandKey[] = L"Software\\Classes\\tinyspeak\\shell\\open\\command";
+    const auto cmd = L"\"" + std::wstring(exe, size) + L"\" --join-uri \"%1\"";
+    std::wstring existing(cmd.size() + 1, L'\0');
+    DWORD bytes = static_cast<DWORD>(existing.size() * sizeof(wchar_t)), marker = 0;
+    if (RegGetValueW(HKEY_CURRENT_USER, commandKey, nullptr, RRF_RT_REG_SZ, nullptr, existing.data(), &bytes) == ERROR_SUCCESS &&
+        cmd == existing.c_str() && RegGetValueW(HKEY_CURRENT_USER, root, L"URL Protocol", RRF_RT_REG_SZ,
+            nullptr, nullptr, &marker) == ERROR_SUCCESS) return true;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, root, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS)
         return false;
     constexpr wchar_t title[] = L"URL:TinySpeak invitation";
     constexpr wchar_t empty[] = L"";
-    RegSetValueExW(key, nullptr, 0, REG_SZ, reinterpret_cast<const BYTE*>(title), sizeof(title));
-    RegSetValueExW(key, L"URL Protocol", 0, REG_SZ, reinterpret_cast<const BYTE*>(empty), sizeof(empty));
+    const bool configured = RegSetValueExW(key, nullptr, 0, REG_SZ, reinterpret_cast<const BYTE*>(title), sizeof(title)) == ERROR_SUCCESS &&
+        RegSetValueExW(key, L"URL Protocol", 0, REG_SZ, reinterpret_cast<const BYTE*>(empty), sizeof(empty)) == ERROR_SUCCESS;
     RegCloseKey(key);
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\tinyspeak\\shell\\open\\command", 0,
+    if (!configured || RegCreateKeyExW(HKEY_CURRENT_USER, commandKey, 0,
         nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) return false;
-    const auto cmd = L"\"" + std::wstring(exe, size) + L"\" \"%1\"";
     LONG result = RegSetValueExW(key, nullptr, 0, REG_SZ, reinterpret_cast<const BYTE*>(cmd.c_str()),
         static_cast<DWORD>((cmd.size() + 1) * sizeof(wchar_t)));
     RegCloseKey(key);
+    if (result == ERROR_SUCCESS) SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
     return result == ERROR_SUCCESS;
 }
 
@@ -243,7 +256,7 @@ private:
     void appendChat(const Json& event);
     void flushLogs();
     void requestJoin(const std::string& code);
-    void promptJoin(const std::wstring& value = {});
+    void promptJoin();
     void promptCreate();
     void promptProfile();
     void promptSettings();
@@ -1044,8 +1057,9 @@ void App::onNetwork(NetworkResult result) {
 void App::requestJoin(const std::string& code) {
     if (code.empty()) return;
     if (directHosting) {
-        if (owned.contains(code)) {
-            ensureHost(code);
+        const auto tag = hostedInvite(code) ? code.substr(code.size() - 16) : code;
+        if (owned.contains(tag)) {
+            if (!onHost || !connected || active() != tag) ensureHost(tag);
             return;
         }
         if (!hostedInvite(code)) {
@@ -1055,7 +1069,7 @@ void App::requestJoin(const std::string& code) {
             return;
         }
         if (code == guestInvite && connected) {
-            submitJoin(code.substr(code.size() - 16));
+            if (active() != tag) submitJoin(tag);
             return;
         }
         auto candidate = std::make_unique<HostProcess>();
@@ -1084,11 +1098,12 @@ void App::submitJoin(const std::string& code) {
     statusText(L"Opening server…");
 }
 
-void App::promptJoin(const std::wstring& value) {
-    std::vector<Field> fields{{Field::Text, L"Invite code or link", value}};
+void App::promptJoin() {
+    std::vector<Field> fields{{Field::Text, L"Invite code"}};
     if (!form(window, L"Join a server", fields)) return;
     const auto code = parseCode(fields.front().text);
-    if (code.empty()) statusText(L"Paste the complete TinySpeak invite code or link.");
+    if (code.empty()) statusText(parseInviteLink(fields.front().text).empty() ?
+        L"Paste the complete TinySpeak invite code." : L"Open this invite link directly, or paste an invite code here.");
     else requestJoin(code);
 }
 
@@ -1169,7 +1184,7 @@ void App::promptPlayback(HWND parent) {
 
 void App::promptSettings() {
     enum SettingField { RelayAddress, InputDevice, OutputDevice, PlaybackEffectsField, InputMode, Threshold, TalkKey, Bitrate, FivePercentSteps,
-        RememberServers, RememberColor, ArchiveChat, RetainOwned, RegisterLinks };
+        RememberServers, RememberColor, ArchiveChat, RetainOwned };
     auto [mics, speakers] = audio.devices();
     auto deviceField = [](const wchar_t* label, const std::vector<AudioDevice>& devices, const std::wstring& current) {
         Field field{Field::Choice, label, L"", {L"Default Windows device"}};
@@ -1200,7 +1215,6 @@ void App::promptSettings() {
         {Field::Check, L"Remember my color", L"", {}, rememberColor},
         {Field::Check, L"Save my chat logs on this computer", L"", {}, archiveChat},
         {Field::Check, L"Save my servers, rooms and chat logs", L"", {}, retainOwned},
-        {Field::Check, L"Open tinyspeak:// invites in Windows", L"", {}, 0},
     };
     fields[Threshold].sliderScale.maximum = microphoneThresholdMax;
     fields[RelayAddress].visible = !directHosting;
@@ -1254,9 +1268,6 @@ void App::promptSettings() {
         refreshServers();
     }
     save();
-    if (fields[RegisterLinks].selected) {
-        statusText(registerInviteLink() ? L"Invite links can now open in TinySpeak." : L"Could not register TinySpeak invite links.");
-    }
     if (address != before) {
         startNetwork(address);
     } else {
@@ -1701,7 +1712,7 @@ LRESULT CALLBACK composerProc(HWND control, UINT message, WPARAM wParam, LPARAM 
         auto old = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(control, WM_GETFONT, 0, 0)));
         fillColor(dc, area, theme::field);
         drawTextLine(dc, area, L"Type a message · Enter to send",
-            IsWindowEnabled(control) ? theme::secondary : theme::muted);
+            IsWindowEnabled(control) ? theme::gray(10) : theme::gray(8));
         SelectObject(dc, old);
         ReleaseDC(control, dc);
     }
@@ -1709,6 +1720,25 @@ LRESULT CALLBACK composerProc(HWND control, UINT message, WPARAM wParam, LPARAM 
 }
 
 LRESULT CALLBACK transcriptProc(HWND control, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR) {
+    switch (message) {
+    case WM_SETCURSOR:
+        if (LOWORD(lParam) == HTCLIENT) {
+            SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+            return TRUE;
+        }
+        break;
+    case WM_SETFOCUS: {
+        auto composer = GetDlgItem(GetParent(control), Message);
+        SetFocus(IsWindowEnabled(composer) ? composer : GetParent(control));
+        return 0;
+    }
+    case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: case WM_LBUTTONUP:
+    case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_CONTEXTMENU:
+        return 0;
+    case WM_MOUSEMOVE:
+        if (wParam & MK_LBUTTON) return 0;
+        break;
+    }
     if (message == WM_MOUSEWHEEL && !(GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL)) {
         int rows = 3;
         SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &rows, 0);
@@ -1782,7 +1812,7 @@ void App::setup() {
         DeleteObject(bitmap);
     }
     TreeView_SetImageList(tree, icons, TVSIL_NORMAL);
-    transcript = make(MSFTEDIT_CLASS, L"", ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_TABSTOP, Transcript);
+    transcript = make(MSFTEDIT_CLASS, L"", ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL, Transcript);
     SendMessageW(transcript, EM_SETBKGNDCOLOR, 0, theme::background);
     SendMessageW(transcript, EM_EXLIMITTEXT, 0, 2 * 1024 * 1024);
     SendMessageW(transcript, EM_EMPTYUNDOBUFFER, 0, 0);
@@ -1805,6 +1835,9 @@ void App::setup() {
         if (!owned.empty()) ensureHost();
         if (!initialInvite.empty()) requestJoin(std::exchange(initialInvite, {}));
         probeBookmarks();
+    }
+    if (!GetEnvironmentVariableW(L"KANAL_DATA_PATH", nullptr, 0) && !registerInviteLink()) {
+        statusText(L"Windows could not register invite links. Join with an invite code.");
     }
     SetTimer(window, uiTimer, timerInterval, nullptr);
 }
@@ -1965,7 +1998,7 @@ LRESULT CALLBACK procedure(HWND window, UINT msg, WPARAM wParam, LPARAM lParam) 
     }
     case WM_COPYDATA: {
         auto* copy = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
-        if (copy->dwData != 1 || copy->cbData < 16 || copy->cbData > 254) return FALSE;
+        if (!copy || !copy->lpData || app->closing || copy->dwData != 1 || copy->cbData < 16 || copy->cbData > 254) return FALSE;
         std::string code(static_cast<const char*>(copy->lpData), copy->cbData);
         if (!validCode(code) && !hostedInvite(code)) return FALSE;
         ShowWindow(window, SW_RESTORE);
@@ -1977,7 +2010,7 @@ LRESULT CALLBACK procedure(HWND window, UINT msg, WPARAM wParam, LPARAM lParam) 
     case inviteReceived:
         if ((app->directHosting || app->connected) && !app->initialInvite.empty()) {
             auto code = std::exchange(app->initialInvite, {});
-            app->promptJoin(wide(code));
+            app->requestJoin(code);
         }
         return 0;
     }
@@ -1990,15 +2023,38 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     if (!richEdit) return 3;
     int argc = 0;
     auto args = CommandLineToArgvW(GetCommandLineW(), &argc);
-    auto code = argc > 1 ? parseCode(args[1]) : std::string{};
+    if (!args) return 2;
+    std::string code;
+    if (argc == 3 && std::wstring_view(args[1]) == L"--join-uri") code = parseInviteLink(args[2]);
+    if (argc == 2) {
+        code = parseInviteLink(args[1]);
+        if (code.empty()) code = parseCode(args[1]);
+    }
     LocalFree(args);
-    if (!code.empty() && !GetEnvironmentVariableW(L"KANAL_DATA_PATH", nullptr, 0)) {
+    if (argc > 1 && code.empty()) return 2;
+    // Serialize lookup and window creation when several links arrive at cold start.
+    const bool normalProfile = !GetEnvironmentVariableW(L"KANAL_DATA_PATH", nullptr, 0);
+    HANDLE startup = normalProfile ? CreateMutexW(nullptr, FALSE, L"Local\\TinySpeak.Desktop.Startup") : nullptr;
+    if (startup) {
+        const auto wait = WaitForSingleObject(startup, 5000);
+        if (wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED) { CloseHandle(startup); return 1; }
+    }
+    if (normalProfile) {
         HWND other = FindWindowW(windowClass, nullptr);
         if (other) {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(other, &pid);
+            AllowSetForegroundWindow(pid);
+            if (startup) { ReleaseMutex(startup); CloseHandle(startup); }
+            if (code.empty()) {
+                ShowWindow(other, SW_RESTORE);
+                SetForegroundWindow(other);
+                return 0;
+            }
             COPYDATASTRUCT data{1, static_cast<DWORD>(code.size()), code.data()};
             DWORD_PTR result = 0;
-            if (SendMessageTimeoutW(other, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data),
-                SMTO_ABORTIFHUNG, 600, &result) && result) return 0;
+            return SendMessageTimeoutW(other, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data),
+                SMTO_ABORTIFHUNG, 3000, &result) && result ? 0 : 1;
         }
     }
     INITCOMMONCONTROLSEX common{sizeof(common), ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES | ICC_STANDARD_CLASSES};
@@ -2013,6 +2069,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     App app(std::move(code));
     HWND window = CreateWindowExW(0, windowClass, L"TinySpeak", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT, 954, 641, nullptr, nullptr, instance, &app);
+    if (startup) { ReleaseMutex(startup); CloseHandle(startup); }
     if (!window) return 2;
     ShowWindow(window, show);
     UpdateWindow(window);

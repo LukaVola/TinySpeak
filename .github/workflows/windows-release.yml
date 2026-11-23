@@ -50,6 +50,9 @@ jobs:
           go test -tags embedded_voice ./...
           if errorlevel 1 exit /b 1
           echo REDIST=%VCToolsRedistDir%>> "%GITHUB_ENV%"
+      - name: Test Windows invite links and chat controls
+        shell: pwsh
+        run: python tests/desktop.py "$env:RUNNER_TEMP/ts-bin/TinySpeak.exe"
       - name: Package and publish the portable ZIP
         env:
           GH_TOKEN: ${{ github.token }}
@@ -72,7 +75,7 @@ jobs:
           Copy-Item README.md,Licenses -Recurse -Destination $app
           $asset = "$env:RUNNER_TEMP/TinySpeak-Windows-x64.zip"
           [IO.Compression.ZipFile]::CreateFromDirectory($app.FullName,$asset,[IO.Compression.CompressionLevel]::Optimal,$true)
-          $notes = 'Extract the complete TinySpeak-Windows-x64.zip and open **Launch TinySpeak.exe**. To talk across networks, use **New server → Menu → Copy invite code** and have your friend paste the full code into **Join**. Both chat and voice can use the bundled encrypted Internet connection.'
+          $notes = 'Extract the whole ZIP and open **Launch TinySpeak.exe** once. Paste a **Copy invite code** in **Join**, or click a **Copy invite link** to open TinySpeak and join the server. Double-click a voice room to talk.'
           $notesFile = "$env:RUNNER_TEMP/patch-notes.md"
           $notes | Set-Content -Encoding utf8 $notesFile
           gh release create $tag $asset --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --prerelease --title $version --notes-file $notesFile
