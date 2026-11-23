@@ -24,6 +24,11 @@ struct AudioDevice {
     std::wstring name;
 };
 
+struct VoiceRelay {
+    std::string address;
+    std::string user, password;
+};
+
 class Voice {
 public:
     using Volumes = std::unordered_map<std::string, int>;
@@ -34,7 +39,7 @@ public:
     Voice& operator=(const Voice&) = delete;
 
     std::pair<std::vector<AudioDevice>, std::vector<AudioDevice>> devices() const;
-    void connect(std::string url, std::string token, std::wstring input, std::wstring output);
+    void connect(std::string url, std::string token, std::wstring input, std::wstring output, VoiceRelay relay = {});
     void disconnect();
     void setParticipantVolumes(Volumes volumes);
     // 0 = activation by voice, 1 = push to talk, 2 = open microphone.

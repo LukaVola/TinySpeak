@@ -15,7 +15,9 @@ go build -buildvcs=false -trimpath -ldflags="-s -w" -o "%output%\kanal-relay.exe
 if errorlevel 1 exit /b %errorlevel%
 go build -buildvcs=false -trimpath -tags embedded_voice -ldflags="-s -w" -o "%output%\TinySpeak Host.exe" .
 if errorlevel 1 exit /b %errorlevel%
-for %%F in ("kanal-relay.exe" "TinySpeak Host.exe") do (
+go run ./internal/tools/fetch-link "%output%"
+if errorlevel 1 exit /b %errorlevel%
+for %%F in ("kanal-relay.exe" "TinySpeak Host.exe" "TinySpeak Link.exe") do (
     mt.exe -nologo -manifest "..\client\standard-user.manifest" "-outputresource:%output%\%%~F;#1"
     if errorlevel 1 exit /b 1
 )

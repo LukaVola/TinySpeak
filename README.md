@@ -2,19 +2,19 @@
 
 TinySpeak is a portable voice and text chat app for small groups on 64-bit Windows. Your PC hosts the server while TinySpeak is open. You and your friends only need a username and an invite.
 
-**[Download Patch 11 for Windows x64 (ZIP)](https://github.com/LukaVola/TinySpeak/releases/download/patch-11/TinySpeak-Windows-x64.zip)**
+**[Download Patch 12 for Windows x64 (ZIP)](https://github.com/LukaVola/TinySpeak/releases/download/patch-12/TinySpeak-Windows-x64.zip)**
 
 ## Start a conversation
 
 1. Download the Windows ZIP above and extract the entire **TinySpeak** folder somewhere you can write to. Open **Launch TinySpeak.exe**. The ZIP includes the voice libraries, host and Windows C++ runtime files.
-2. To host, choose **New server**, then **Menu → Copy invite code**. Send the full code to your friends.
+2. To host, choose **New server**, then **Menu → Copy invite code**. Send the full code to your friends. For Internet invites, everyone should use Patch 12 or newer.
 3. To join, open TinySpeak, click **Join** and paste the code. Double-click the same voice room to talk. The microphone button controls mute. Press **Enter** to send a text message.
 
-TinySpeak runs as a standard Windows user. Only the owner runs **TinySpeak Host.exe**, which handles both incoming chat and voice. Windows Firewall may ask the owner to allow incoming connections. On managed PCs, an administrator may need to approve this. When updating, close TinySpeak and extract the new version over the same folder so path-based firewall rules continue to apply.
+TinySpeak runs as a standard Windows user. **TinySpeak Host.exe** runs the rooms, chat and voice on the owner's PC. **TinySpeak Link.exe** connects peers over the Internet. Windows Firewall may ask about network access. When updating, close TinySpeak and extract the new version over the same folder.
 
-The host's TinySpeak must stay open. The app tries to open a direct IPv4 route using the router's UPnP support. A publicly reachable host can also accept direct connections. CGNAT, unsupported port mapping, and firewall restrictions can limit the invite to the local network. TinySpeak does not require a VPN for direct connections.
+The host keeps TinySpeak open during the conversation. Friends on different networks paste the same invite. The bundled iroh transport uses a direct connection when possible and can carry both text and voice through a public relay if the router blocks incoming connections. The relay forwards encrypted traffic. It can see connection metadata such as IP addresses and traffic volume. The public relays have rate limits and no uptime guarantee. [About the iroh relay network](https://www.iroh.computer/services/hosting)
 
-The complete host invite contains the server tag, the host address and a certificate fingerprint that authenticates the host. Share a fresh invite if the host changes networks or its IP address changes. The server tag displayed next to the server name stays 16 characters.
+The full Internet invite starts with **TS2-** and contains the information needed to reach and authenticate the host. The 16-character server tag identifies the server inside TinySpeak. Existing **TS1-** invites still work on their original direct routes. After updating a host from Patch 11, copy a fresh invite. If the public relay is unavailable at startup, TinySpeak can still offer its direct or LAN invite.
 
 ## Audio controls
 

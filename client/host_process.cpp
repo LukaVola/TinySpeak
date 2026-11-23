@@ -18,12 +18,21 @@ std::filesystem::path programFolder() {
 }
 
 bool hostedInvite(std::string_view code) {
-    if (code.size() != 53 || !code.starts_with("TS1-") || code[36] != '.') return false;
+    const bool legacy = code.starts_with("TS1-");
+    if (code.size() < 53 || code.size() > 254 || code[36] != '.') return false;
+    if (legacy && code.size() != 53) return false;
+    if (!legacy) {
+        if (!code.starts_with("TS2-") || code.size() < 118 || code[code.size() - 17] != '.') return false;
+        const auto ticket = code.substr(37, code.size() - 54);
+        if (!ticket.starts_with("endpoint") || !std::ranges::all_of(ticket, [](char c) {
+            return (c >= 'a' && c <= 'z') || (c >= '2' && c <= '7');
+        })) return false;
+    }
     const auto alphanumeric = [](char c) {
         return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
     };
     return std::ranges::all_of(code.substr(4, 32), [&](char c) { return alphanumeric(c) || c == '-' || c == '_'; }) &&
-        std::ranges::all_of(code.substr(37), alphanumeric);
+        std::ranges::all_of(code.substr(code.size() - 16), alphanumeric);
 }
 
 HostProcess::~HostProcess() { stop(); }

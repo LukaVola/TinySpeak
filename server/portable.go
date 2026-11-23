@@ -40,6 +40,7 @@ const (
 type directRoute struct {
 	public, local netip.Addr
 	pin           [16]byte
+	ticket        string
 }
 
 func (r directRoute) encode() string {
@@ -50,16 +51,24 @@ func (r directRoute) encode() string {
 
 func decodeInvite(code string) (directRoute, string, error) {
 	var route directRoute
-	encoded, server, ok := strings.Cut(strings.TrimPrefix(code, "TS1-"), ".")
+	var encoded, server string
+	switch parts := strings.Split(code, "."); {
+	case len(parts) == 2 && strings.HasPrefix(parts[0], "TS1-"):
+		encoded, server = parts[0][4:], parts[1]
+	case len(parts) == 3 && strings.HasPrefix(parts[0], "TS2-") && validInternetTicket(parts[1]):
+		encoded, route.ticket, server = parts[0][4:], parts[1], parts[2]
+	default:
+		return route, "", errors.New("Invalid TinySpeak host invite.")
+	}
 	packed, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
-	if !ok || !strings.HasPrefix(code, "TS1-") || err != nil || len(packed) != 24 || !validID(server, 16) {
+	if err != nil || len(packed) != 24 || !validID(server, 16) {
 		return route, "", errors.New("Invalid TinySpeak host invite.")
 	}
 	route.public = netip.AddrFrom4([4]byte(packed[:4]))
 	route.local = netip.AddrFrom4([4]byte(packed[4:8]))
 	copy(route.pin[:], packed[8:])
 	if (!route.public.IsUnspecified() && !publicIPv4(route.public)) ||
-		!route.local.IsGlobalUnicast() && !route.local.IsLoopback() {
+		!route.local.IsGlobalUnicast() && !route.local.IsLoopback() && !(route.ticket != "" && route.local.IsUnspecified()) {
 		return route, "", errors.New("Invalid address in the TinySpeak invite.")
 	}
 	return route, server, nil
@@ -134,7 +143,7 @@ func localIPv4() netip.Addr {
 	return netip.MustParseAddr("127.0.0.1")
 }
 
-func runVoice(ctx context.Context, program, nodeIP, key string) (string, <-chan error, error) {
+func runVoice(ctx context.Context, program, nodeIP, key string, tcpPort, udpPort int) (string, <-chan error, error) {
 	reservation, err := loopbackListener()
 	if err != nil {
 		return "", nil, err
@@ -159,7 +168,7 @@ room:
   enabled_codecs:
     - mime: audio/opus
     - mime: audio/red
-`, port, key, nodeIP, mediaTCP, mediaUDP)
+`, port, key, nodeIP, tcpPort, udpPort)
 	exited, err := startVoiceService(ctx, program, config)
 	if err != nil {
 		return "", nil, err
@@ -199,19 +208,42 @@ func directHost(ctx context.Context, profile, voiceBinary string) error {
 	}
 	defer local.Close()
 	inbound, err := net.Listen("tcp4", ":"+strconv.Itoa(directPort))
-	if err != nil {
-		return errors.New("The TinySpeak hosting port is in use. Close the other host and try again.")
+	standardPorts := err == nil
+	tcpPort, udpPort := mediaTCP, mediaUDP
+	if !standardPorts {
+		// Two local hosts can coexist using their separate encrypted endpoints.
+		inbound, err = loopbackListener()
+		if err != nil {
+			return err
+		}
 	}
 	defer inbound.Close()
+	if !standardPorts {
+		tcp, err := loopbackListener()
+		if err != nil {
+			return err
+		}
+		tcpPort = tcp.Addr().(*net.TCPAddr).Port
+		tcp.Close()
+		udp, err := net.ListenUDP("udp4", &net.UDPAddr{})
+		if err != nil {
+			return err
+		}
+		udpPort = udp.LocalAddr().(*net.UDPAddr).Port
+		udp.Close()
+	}
 	lanIP := localIPv4()
-	gateway := discoverGateway(ctx, lanIP)
+	gateway := gatewayMapping{public: netip.IPv4Unspecified()}
+	if standardPorts {
+		gateway = discoverGateway(ctx, lanIP)
+	}
 	wanIP := gateway.public
 	nodeIP := lanIP
 	if !wanIP.IsUnspecified() {
 		nodeIP = wanIP
 	}
 	key := randomString(48)
-	voiceAddress, voiceExited, err := runVoice(voiceCtx, voiceBinary, nodeIP.String(), key)
+	voiceAddress, voiceExited, err := runVoice(voiceCtx, voiceBinary, nodeIP.String(), key, tcpPort, udpPort)
 	if err != nil {
 		return err
 	}
@@ -240,11 +272,31 @@ func directHost(ctx context.Context, profile, voiceBinary string) error {
 		http:  &http.Client{Timeout: 5 * time.Second},
 		voice: voiceConfig{URL: "ws://" + voiceAddress, Admin: internalVoice.String(), Key: "tinyspeak", Secret: key},
 	}
+	ticket := ""
+	turnAddress := ""
+	if os.Getenv("TINYSPEAK_LAN_ONLY") != "1" {
+		secret := randomString(48)
+		turnServer, addr, turnErr := startInternetVoice(net.IP(lanIP.AsSlice()), udpPort, secret)
+		if turnErr == nil {
+			defer turnServer.Close()
+			ticket = hostInternetLink(ctx, certificate, net.JoinHostPort("127.0.0.1", strconv.Itoa(inbound.Addr().(*net.TCPAddr).Port)))
+			if ticket != "" {
+				s.voice.turnSecret = secret
+				turnAddress = addr
+			}
+		}
+	}
+	if !standardPorts && ticket == "" {
+		return errors.New("The hosting port is already in use and the Internet relay is unavailable.")
+	}
 	go s.expire(ctx)
 	localServer := directHTTP(http.HandlerFunc(s.handle))
 	remote := http.NewServeMux()
 	remote.HandleFunc("/api", s.handle)
 	remote.HandleFunc("/server/", s.checkInvite)
+	if turnAddress != "" {
+		remote.Handle("/voice-path", s.internetVoiceHandler(ctx, turnAddress))
+	}
 	voiceProxy := httputil.NewSingleHostReverseProxy(internalVoice)
 	voiceProxy.ErrorLog = quietLog()
 	remote.Handle("/rtc", voiceProxy)
@@ -259,7 +311,7 @@ func directHost(ctx context.Context, profile, voiceBinary string) error {
 	digest := sha256.Sum256(certificate.Certificate[0])
 	route := directRoute{public: wanIP, local: lanIP, pin: [16]byte(digest[:16])}
 	if err := json.NewEncoder(os.Stdout).Encode(map[string]any{
-		"address": "http://" + local.Addr().String(), "route": route.encode(), "internet": !wanIP.IsUnspecified(),
+		"address": "http://" + local.Addr().String(), "route": route.encode(), "internet": ticket != "" || !wanIP.IsUnspecified(), "ticket": ticket,
 	}); err != nil {
 		return err
 	}
@@ -317,7 +369,7 @@ func directTransport(pin [16]byte) *http.Transport {
 	}
 }
 
-func findHost(ctx context.Context, route directRoute, code string, transport *http.Transport) (*url.URL, string, error) {
+func findDirectHost(ctx context.Context, route directRoute, code string, transport *http.Transport) (*url.URL, string, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type result struct {
@@ -338,17 +390,8 @@ func findHost(ctx context.Context, route directRoute, code string, transport *ht
 			base := &url.URL{Scheme: "https", Host: net.JoinHostPort(address.String(), strconv.Itoa(directPort))}
 			probe, cancel := context.WithTimeout(ctx, 4*time.Second)
 			defer cancel()
-			request, _ := http.NewRequestWithContext(probe, http.MethodGet, base.String()+"/server/"+code, nil)
-			reply, err := transport.RoundTrip(request)
-			if err != nil {
-				results <- result{}
-				return
-			}
-			defer reply.Body.Close()
-			var found advert
-			if reply.StatusCode == http.StatusOK && json.NewDecoder(io.LimitReader(reply.Body, 4096)).Decode(&found) == nil &&
-				found.Code == code && found.Name != "" {
-				results <- result{base, found.Name}
+			if name, ok := readAdvert(probe, base, code, transport); ok {
+				results <- result{base, name}
 				return
 			}
 			results <- result{}
@@ -362,14 +405,44 @@ func findHost(ctx context.Context, route directRoute, code string, transport *ht
 	return nil, "", errors.New("Could not reach this server. Check that the owner's TinySpeak is open and ask for a fresh invite.")
 }
 
+func findHost(ctx context.Context, route directRoute, code string, transport *http.Transport) (*url.URL, string, bool, error) {
+	if route.ticket != "" {
+		if !route.local.IsUnspecified() {
+			lan := &url.URL{Scheme: "https", Host: net.JoinHostPort(route.local.String(), strconv.Itoa(directPort))}
+			probe, cancel := context.WithTimeout(ctx, 650*time.Millisecond)
+			name, ok := readAdvert(probe, lan, code, transport)
+			cancel()
+			if ok {
+				return lan, name, false, nil
+			}
+		}
+		linkCtx, stopLink := context.WithCancel(ctx)
+		if relay, err := guestInternetLink(linkCtx, route.ticket); err == nil {
+			check, done := context.WithTimeout(linkCtx, 14*time.Second)
+			name, ok := readAdvert(check, relay, code, transport)
+			done()
+			if ok {
+				context.AfterFunc(ctx, stopLink)
+				return relay, name, true, nil
+			}
+		}
+		stopLink()
+	}
+	target, name, err := findDirectHost(ctx, route, code, transport)
+	return target, name, false, err
+}
+
 func directGuest(ctx context.Context, invite string) error {
 	route, code, err := decodeInvite(invite)
 	if err != nil {
 		return err
 	}
 	transport := directTransport(route.pin)
+	if route.ticket != "" {
+		transport.TLSHandshakeTimeout = 12 * time.Second
+	}
 	defer transport.CloseIdleConnections()
-	target, _, err := findHost(ctx, route, code, transport)
+	target, _, relayed, err := findHost(ctx, route, code, transport)
 	if err != nil {
 		return err
 	}
@@ -378,6 +451,17 @@ func directGuest(ctx context.Context, invite string) error {
 		return err
 	}
 	defer listener.Close()
+	turnPort := 0
+	turnHost := ""
+	if relayed {
+		bridge, err := guestVoiceBridge(ctx, target, code, transport)
+		if err != nil {
+			return err
+		}
+		defer bridge.Close()
+		turnPort = bridge.Addr().(*net.TCPAddr).Port
+		turnHost = bridge.Addr().(*net.TCPAddr).IP.String()
+	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Transport = transport
 	proxy.ErrorLog = quietLog()
@@ -395,7 +479,7 @@ func directGuest(ctx context.Context, invite string) error {
 	defer server.Close()
 	failure := make(chan error, 1)
 	go func() { failure <- server.Serve(listener) }()
-	if err := json.NewEncoder(os.Stdout).Encode(map[string]string{"address": "http://" + listener.Addr().String()}); err != nil {
+	if err := json.NewEncoder(os.Stdout).Encode(map[string]any{"address": "http://" + listener.Addr().String(), "turnPort": turnPort, "turnHost": turnHost}); err != nil {
 		return err
 	}
 	select {
@@ -410,7 +494,7 @@ func probeInvites(ctx context.Context, invites []string) error {
 	jobs := make(chan string)
 	results := make(chan advert, len(invites))
 	var workers sync.WaitGroup
-	for range min(12, len(invites)) {
+	for range min(2, len(invites)) {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
@@ -420,7 +504,12 @@ func probeInvites(ctx context.Context, invites []string) error {
 					continue
 				}
 				transport := directTransport(route.pin)
-				_, name, err := findHost(ctx, route, code, transport)
+				attempt, cancel := context.WithCancel(ctx)
+				if route.ticket != "" {
+					transport.TLSHandshakeTimeout = 12 * time.Second
+				}
+				_, name, _, err := findHost(attempt, route, code, transport)
+				cancel()
 				transport.CloseIdleConnections()
 				if err == nil {
 					results <- advert{Code: code, Name: name}
@@ -451,7 +540,7 @@ func probeInvites(ctx context.Context, invites []string) error {
 
 func portableMain(args []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	defer func() { cancel(); transportChildren.Wait() }()
 	go func() {
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		cancel()

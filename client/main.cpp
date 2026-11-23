@@ -177,7 +177,9 @@ private:
     std::wstring address{localAddress}, microphone, playback, status{L"Connecting to the relay…"};
     std::string name, id, initialInvite, pendingJoin, currentText, currentVoice, profileSecret;
     std::wstring hostAddress, guestAddress;
-    std::string hostRoute, parkedID, hostJoin, guestInvite, candidateInvite, afterRegistration;
+    std::string hostRoute, hostTicket, parkedID, hostJoin, guestInvite, candidateInvite, afterRegistration;
+    int guestTurnPort = 0;
+    std::string guestTurnHost;
     fs::path directory;
     std::map<std::string, Owned> owned;
     std::map<std::string, std::string> bookmarks, available;
@@ -198,7 +200,8 @@ private:
     std::string activeInvite() const {
         const auto code = active();
         if (code.empty() || !directHosting) return code;
-        return onHost ? "TS1-" + hostRoute + "." + code : guestInvite;
+        if (!onHost) return guestInvite;
+        return hostTicket.empty() ? "TS1-" + hostRoute + "." + code : "TS2-" + hostRoute + "." + hostTicket + "." + code;
     }
     bool owner() const { return !id.empty() && state.value("owner", "") == id; }
     std::wstring roomName(const std::string& value) const;
@@ -485,6 +488,7 @@ void App::tickHelpers() {
             hostStarting = false;
             hostAddress = reply ? wide(reply->value("address", "")) : L"";
             hostRoute = reply ? reply->value("route", "") : "";
+            hostTicket = reply ? reply->value("ticket", "") : "";
             hostInternet = reply && reply->value("internet", false);
             if (hostAddress.empty() || hostRoute.size() != 32) {
                 statusText(reply ? wide(reply->value("error", "The host could not start.")) : L"The host could not start.");
@@ -528,7 +532,9 @@ void App::tickHelpers() {
                     parkedHost = std::move(network);
                 }
                 onHost = false;
-                afterRegistration = candidateInvite.substr(37);
+                afterRegistration = candidateInvite.substr(candidateInvite.size() - 16);
+                guestTurnPort = reply->value("turnPort", 0);
+                guestTurnHost = reply->value("turnHost", "");
                 startNetwork(endpoint);
                 guest = std::move(joiningGuest);
                 guestAddress = std::move(endpoint);
@@ -910,7 +916,7 @@ void App::onNetwork(NetworkResult result) {
             available.clear();
             refreshServers();
             refreshActions();
-            if (guest && !guestInvite.empty()) afterRegistration = guestInvite.substr(37);
+            if (guest && !guestInvite.empty()) afterRegistration = guestInvite.substr(guestInvite.size() - 16);
             registerClient();
         }
         if (op == "chat" && windowText(composer).empty() && request.value("code", "") == active() &&
@@ -994,7 +1000,11 @@ void App::onNetwork(NetworkResult result) {
             currentVoice = request.value("room", "");
             const auto url = directHosting && !onHost && guestAddress.starts_with(L"http://") ?
                 "ws://" + utf8(guestAddress.substr(7)) : response.value("url", "");
-            audio.connect(url, response.value("token", ""), microphone, playback);
+            VoiceRelay relay;
+            if (directHosting && !onHost && guestTurnPort > 0 && guestTurnPort <= 65535) {
+                relay = {guestTurnHost + ":" + std::to_string(guestTurnPort), response.value("turnUser", ""), response.value("turnPassword", "")};
+            }
+            audio.connect(url, response.value("token", ""), microphone, playback, std::move(relay));
         }
     } else if (op == "leave") {
         statusText(L"You left the server.");
@@ -1015,7 +1025,7 @@ void App::requestJoin(const std::string& code) {
             return;
         }
         if (code == guestInvite && connected) {
-            submitJoin(code.substr(37));
+            submitJoin(code.substr(code.size() - 16));
             return;
         }
         auto candidate = std::make_unique<HostProcess>();
@@ -1889,7 +1899,7 @@ LRESULT CALLBACK procedure(HWND window, UINT msg, WPARAM wParam, LPARAM lParam) 
     }
     case WM_COPYDATA: {
         auto* copy = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
-        if (copy->dwData != 1 || (copy->cbData != 16 && copy->cbData != 53)) return FALSE;
+        if (copy->dwData != 1 || copy->cbData < 16 || copy->cbData > 254) return FALSE;
         std::string code(static_cast<const char*>(copy->lpData), copy->cbData);
         if (!validCode(code) && !hostedInvite(code)) return FALSE;
         ShowWindow(window, SW_RESTORE);

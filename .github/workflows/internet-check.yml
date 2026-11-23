@@ -1,0 +1,48 @@
+name: Internet voice and chat fixture
+on:
+  workflow_dispatch:
+  push:
+    branches: [internet-check]
+permissions:
+  contents: read
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - name: Build the independent Internet host
+        working-directory: server
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/tinyspeak"
+          CGO_ENABLED=0 go build -trimpath -tags embedded_voice -o "$RUNNER_TEMP/tinyspeak/host" .
+          curl -fsSL https://github.com/n0-computer/dumbpipe/releases/download/v0.40.2/dumbpipe-v0.40.2-linux-x86_64.tar.gz -o "$RUNNER_TEMP/link.tar.gz"
+          echo "25823c4fb7d10430740a1b57111108c6950c2eb901874a7ebd894bda5894089d  $RUNNER_TEMP/link.tar.gz" | sha256sum -c
+          tar -xzf "$RUNNER_TEMP/link.tar.gz" -C "$RUNNER_TEMP/tinyspeak"
+          install -m 755 "$(find "$RUNNER_TEMP/tinyspeak" -type f -name dumbpipe -print -quit)" "$RUNNER_TEMP/tinyspeak/TinySpeak Link.exe"
+      - name: Start a fresh, synthetic room
+        id: start
+        run: |
+          set -eu
+          base="$RUNNER_TEMP/tinyspeak"
+          node tests/internet-host.mjs "$base/host" "$base" >"$base/test.log" 2>&1 </dev/null &
+          for attempt in {1..45}; do
+            if test -s "$base/invite"; then echo "invite=$(cat "$base/invite")" >> "$GITHUB_OUTPUT"; exit 0; fi
+            sleep 1
+          done
+          tail -20 "$base/test.log"
+          exit 1
+      - name: Test invite ${{ steps.start.outputs.invite }}
+        run: |
+          base="$RUNNER_TEMP/tinyspeak"
+          for attempt in {1..150}; do
+            if test -s "$base/passed"; then cat "$base/passed"; exit 0; fi
+            sleep 2
+          done
+          tail -20 "$base/test.log"
+          exit 1

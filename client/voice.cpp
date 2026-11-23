@@ -218,8 +218,16 @@ struct Connection final : livekit::RoomDelegate {
         }
     }
 
-    bool open(const std::string& url, const std::string& token, const std::wstring& microphone, const std::wstring& playback) {
-        if (!context.ok || !wake || !room.connect(url, token, livekit::RoomOptions{})) return false;
+    bool open(const std::string& url, const std::string& token, const std::wstring& microphone, const std::wstring& playback, const VoiceRelay& relay) {
+        livekit::RoomOptions options;
+        if (!relay.address.empty()) {
+            if (relay.user.empty() || relay.password.empty()) return false;
+            livekit::RtcConfig rtc;
+            rtc.ice_transport_type = 0; // LiveKit TRANSPORT_RELAY
+            rtc.ice_servers.push_back({"turn:" + relay.address + "?transport=tcp", relay.user, relay.password});
+            options.rtc_config = std::move(rtc);
+        }
+        if (!context.ok || !wake || !room.connect(url, token, options)) return false;
         ma_device_info *mics = nullptr, *speakers = nullptr;
         ma_uint32 micCount = 0, speakerCount = 0;
         ma_context_get_devices(&context.ctx, &speakers, &speakerCount, &mics, &micCount);
@@ -270,6 +278,7 @@ struct Voice::Impl {
     std::mutex mutex;
     std::condition_variable ready;
     std::string url, token;
+    VoiceRelay relay;
     std::wstring input, output;
     bool updated = false, exit = false;
     std::thread worker;
@@ -292,6 +301,7 @@ struct Voice::Impl {
             ready.wait(lock, [this] { return exit || updated; });
             if (exit) break;
             std::string to = url, access = token;
+            VoiceRelay voiceRelay = relay;
             std::wstring microphone = input, speaker = output;
             updated = false;
             lock.unlock();
@@ -305,7 +315,7 @@ struct Voice::Impl {
                 if (!initialized) initialized = livekit::initialize(livekit::LogLevel::Off);
                 if (initialized) {
                     current = std::make_unique<Connection>(owner, gains);
-                    if (current->open(to, access, microphone, speaker)) {
+                    if (current->open(to, access, microphone, speaker, voiceRelay)) {
                         std::lock_guard latest(mutex);
                         owner.permitted = !updated && !exit;
                         continue;
@@ -323,12 +333,13 @@ struct Voice::Impl {
 Voice::Voice() : impl_(std::make_unique<Impl>(*this)) {}
 Voice::~Voice() = default;
 
-void Voice::connect(std::string url, std::string token, std::wstring input, std::wstring output) {
+void Voice::connect(std::string url, std::string token, std::wstring input, std::wstring output, VoiceRelay relay) {
     std::lock_guard lock(impl_->mutex);
     permitted = false;
     status = url.empty() ? 0 : 1;
     impl_->url = std::move(url);
     impl_->token = std::move(token);
+    impl_->relay = std::move(relay);
     impl_->input = std::move(input);
     impl_->output = std::move(output);
     impl_->updated = true;

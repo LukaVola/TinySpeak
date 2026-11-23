@@ -109,22 +109,25 @@ type state struct {
 }
 
 type response struct {
-	Error   string   `json:"error,omitempty"`
-	Key     string   `json:"key,omitempty"`
-	User    *user    `json:"user,omitempty"`
-	State   *state   `json:"state,omitempty"`
-	Events  []event  `json:"events,omitempty"`
-	Catalog []advert `json:"catalog,omitempty"`
-	URL     string   `json:"url,omitempty"`
-	Token   string   `json:"token,omitempty"`
-	Room    *room    `json:"room,omitempty"`
-	Retry   bool     `json:"retry,omitempty"`
-	Reset   bool     `json:"reset,omitempty"`
-	Version uint64   `json:"version,omitempty"`
+	Error        string   `json:"error,omitempty"`
+	Key          string   `json:"key,omitempty"`
+	User         *user    `json:"user,omitempty"`
+	State        *state   `json:"state,omitempty"`
+	Events       []event  `json:"events,omitempty"`
+	Catalog      []advert `json:"catalog,omitempty"`
+	URL          string   `json:"url,omitempty"`
+	Token        string   `json:"token,omitempty"`
+	TurnUser     string   `json:"turnUser,omitempty"`
+	TurnPassword string   `json:"turnPassword,omitempty"`
+	Room         *room    `json:"room,omitempty"`
+	Retry        bool     `json:"retry,omitempty"`
+	Reset        bool     `json:"reset,omitempty"`
+	Version      uint64   `json:"version,omitempty"`
 }
 
 type voiceConfig struct {
 	URL, Admin, Key, Secret string
+	turnSecret              string
 }
 
 type service struct {
@@ -509,7 +512,11 @@ func (s *service) command(c *client, q request) response {
 		}
 		grant := map[string]any{"roomJoin": true, "room": c.active + "-" + q.Room, "canPublish": true,
 			"canPublishSources": []string{"microphone"}, "canPublishData": false, "canSubscribe": true}
-		return response{State: s.snapshot(c), URL: s.voice.URL, Token: s.voice.jwt(c.voiceID, grant)}
+		result := response{State: s.snapshot(c), URL: s.voice.URL, Token: s.voice.jwt(c.voiceID, grant)}
+		if s.voice.turnSecret != "" {
+			result.TurnUser, result.TurnPassword = voiceCredentials(s.voice.turnSecret, c.voiceID)
+		}
+		return result
 	case "voice_leave":
 		s.stopVoice(c)
 		active.changed()

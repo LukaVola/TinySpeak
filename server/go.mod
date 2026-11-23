@@ -4,7 +4,10 @@ go 1.26.0
 
 require github.com/huin/goupnp v1.3.0
 
-require github.com/livekit/livekit-server v1.13.11
+require (
+	github.com/livekit/livekit-server v1.13.11
+	github.com/pion/turn/v5 v5.0.13
+)
 
 // Use the WebRTC implementations pinned by the bundled LiveKit server.
 replace github.com/pion/webrtc/v4 => github.com/livekit/webrtc-pion/v4 v4.2.18-warp.7
@@ -77,7 +80,6 @@ require (
 	github.com/pion/stun/v3 v3.1.7 // indirect
 	github.com/pion/transport/v4 v4.1.1 // indirect
 	github.com/pion/transport/v5 v5.1.1 // indirect
-	github.com/pion/turn/v5 v5.0.13 // indirect
 	github.com/pion/webrtc/v4 v4.2.18 // indirect
 	github.com/pires/go-proxyproto v0.15.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
