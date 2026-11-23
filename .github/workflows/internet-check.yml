@@ -94,6 +94,7 @@ jobs:
         run: |
           $app = "$env:RUNNER_TEMP/ts/TinySpeak"
           $room = (New-Item -Type Directory "$env:RUNNER_TEMP/test-room").FullName
+          Get-NetIPAddress -AddressFamily IPv4 | Select-Object InterfaceAlias, IPAddress | Format-Table
           $files = (Join-Path $env:GITHUB_WORKSPACE 'tests/internet-host.mjs'), "$app/TinySpeak Host.exe", $room
           $arguments = ($files | ForEach-Object { '"' + $_ + '"' }) -join ' '
           $server = Start-Process -FilePath (Get-Command node).Source -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput "$room/out.log" -RedirectStandardError "$room/err.log"
@@ -131,5 +132,15 @@ jobs:
           if ($env:TEST_INVITE -cnotmatch '^TS2-[A-Za-z0-9_-]{32}\.endpoint[a-z2-7]{50,192}\.[A-Za-z0-9]{16}$') { throw 'Missing the disposable Internet invite' }
           $file = "$env:RUNNER_TEMP/return-invite"
           [IO.File]::WriteAllText($file,$env:TEST_INVITE)
-          node tests/internet-client.mjs $app "$app/probe.exe" $file
-          if ($LASTEXITCODE) { throw 'The Windows guests did not receive both audio streams' }
+          Get-NetIPAddress -AddressFamily IPv4 | Select-Object InterfaceAlias, IPAddress | Format-Table
+          $env:TINYSPEAK_TEST_TRACE = '1'
+          $trace = "$env:RUNNER_TEMP/guest-trace.log"
+          node tests/internet-client.mjs $app "$app/probe.exe" $file *> $trace
+          $result = $LASTEXITCODE
+          Select-String -Path $trace -Pattern 'Chat round trip|RTC connection|5/5 received|PASS: Internet' | ForEach-Object Line
+          if ($result) {
+            Select-String -Path $trace -Pattern 'allocate|StunPort|turnport|candidate pair|candidate:|connectivity check|socket error' |
+              Where-Object { $_.Line.Length -lt 500 -and $_.Line -notmatch 'token|credential|password|sdp|eyJ' } |
+              Select-Object -Last 40 | ForEach-Object Line
+            throw 'The Windows guests did not receive both audio streams'
+          }
