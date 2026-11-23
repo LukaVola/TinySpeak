@@ -1,0 +1,11 @@
+port: 17880
+rtc:
+  tcp_port: 17881
+  udp_port: 17882
+logging:
+  level: error
+room:
+  max_participants: 16
+  enabled_codecs:
+    - mime: audio/opus
+    - mime: audio/red

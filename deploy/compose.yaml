@@ -1,0 +1,34 @@
+services:
+  relay:
+    build: ../server
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      KANAL_LISTEN: 127.0.0.1:8090
+      KANAL_VOICE_URL: wss://${KANAL_RTC_DOMAIN:?set KANAL_RTC_DOMAIN}
+      KANAL_VOICE_ADMIN: http://127.0.0.1:7880
+      KANAL_VOICE_KEY: ${KANAL_VOICE_KEY:?set KANAL_VOICE_KEY}
+      KANAL_VOICE_SECRET: ${KANAL_VOICE_SECRET:?set KANAL_VOICE_SECRET}
+  livekit:
+    image: livekit/livekit-server:v1.13.11
+    network_mode: host
+    restart: unless-stopped
+    command: ["--bind", "127.0.0.1", "--config", "/etc/livekit.yaml"]
+    environment:
+      LIVEKIT_KEYS: "${KANAL_VOICE_KEY}: ${KANAL_VOICE_SECRET}"
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+  caddy:
+    image: caddy:2-alpine
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      KANAL_DOMAIN: ${KANAL_DOMAIN:?set KANAL_DOMAIN}
+      KANAL_RTC_DOMAIN: ${KANAL_RTC_DOMAIN:?set KANAL_RTC_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+volumes:
+  caddy_data:
+  caddy_config:

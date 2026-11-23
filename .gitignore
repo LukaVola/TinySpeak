@@ -1,0 +1,10 @@
+/go-cache/
+/build/
+/dist/
+*.obj
+*.res
+*.exe
+*.dll
+*.pdb
+.env
+host-identity.pem

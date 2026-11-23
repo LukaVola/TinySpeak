@@ -1,0 +1,7 @@
+{$KANAL_DOMAIN} {
+	reverse_proxy 127.0.0.1:8090
+}
+
+{$KANAL_RTC_DOMAIN} {
+	reverse_proxy 127.0.0.1:7880
+}
