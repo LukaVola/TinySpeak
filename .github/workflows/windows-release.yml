@@ -77,3 +77,9 @@ jobs:
           $notes | Set-Content -Encoding utf8 $notesFile
           gh release create $tag $asset --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --prerelease --title $version --notes-file $notesFile
           if ($LASTEXITCODE) { throw 'Could not publish the release' }
+  check-internet:
+    needs: release
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/internet-check.yml

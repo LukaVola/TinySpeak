@@ -1,5 +1,6 @@
 name: Verify Windows chat and voice across the Internet
 on:
+  workflow_call:
   workflow_dispatch:
   push:
     branches: [internet-check]
@@ -56,6 +57,62 @@ jobs:
           done
           tail -20 "$base/test.log"
           exit 1
+  windows-peer:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/windows-voice-probe
+      - name: Read the disposable host invite from this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $url = "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID/jobs?per_page=100"
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN" }
+          $pattern = '^Test invite (TS2-[A-Za-z0-9_-]{32}\.endpoint[a-z2-7]{50,192}\.[A-Za-z0-9]{16})$'
+          foreach ($attempt in 1..120) {
+            $jobs = (Invoke-RestMethod $url -Headers $headers -MaximumRetryCount 2).jobs
+            foreach ($job in $jobs) {
+              foreach ($step in $job.steps) {
+                if ($step.name -cmatch $pattern) {
+                  [IO.File]::WriteAllText("$env:RUNNER_TEMP/host-invite", $Matches[1])
+                  exit 0
+                }
+              }
+            }
+            Start-Sleep -Seconds 4
+          }
+          throw 'The Linux host did not publish its disposable invite'
+      - name: Test the Linux host and host a room for the second Windows runner
+        shell: pwsh
+        run: |
+          $app = "$env:RUNNER_TEMP/ts/TinySpeak"
+          $room = (New-Item -Type Directory "$env:RUNNER_TEMP/test-room").FullName
+          $files = (Join-Path $env:GITHUB_WORKSPACE 'tests/internet-host.mjs'), "$app/TinySpeak Host.exe", $room
+          $arguments = ($files | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $server = Start-Process -FilePath (Get-Command node).Source -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput "$room/out.log" -RedirectStandardError "$room/err.log"
+          try {
+            foreach ($attempt in 1..45) {
+              if (Test-Path "$room/invite") { break }
+              if ($server.HasExited) { throw 'Windows test host stopped' }
+              Start-Sleep -Seconds 1
+            }
+            if (!(Test-Path "$room/invite")) { throw 'Windows test host did not advertise' }
+            node tests/internet-client.mjs $app "$app/probe.exe" "$env:RUNNER_TEMP/host-invite" "$room/invite"
+            if ($LASTEXITCODE) { throw 'The first Windows guests failed' }
+            if (!$server.WaitForExit(360000) -or $server.ExitCode -ne 0 -or !(Test-Path "$room/passed")) {
+              throw 'The second Windows runner did not verify this host'
+            }
+          } finally {
+            if (!$server.HasExited) { $server.Kill($true) }
+            Get-Content "$room/out.log", "$room/err.log" -Tail 20
+          }
   windows-guests:
     needs: host
     runs-on: windows-2022
@@ -64,33 +121,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Download the published Windows package and its test SDK
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $resource = Get-Content -Raw client/TinySpeak.rc
-          if ($resource -notmatch 'ProductVersion",\s*"Patch ([0-9]+)') { throw 'Missing Windows patch number' }
-          $tag = "patch-$($Matches[1])"
-          $release = Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
-          $asset = $release.assets | Where-Object name -eq 'TinySpeak-Windows-x64.zip'
-          $package = "$env:RUNNER_TEMP/bundle.zip"
-          curl.exe -fsSL --retry 3 $asset.browser_download_url -o $package
-          if ($LASTEXITCODE -or $asset.digest -ne "sha256:$((Get-FileHash $package).Hash)") { throw 'Windows package digest mismatch' }
-          Expand-Archive $package -DestinationPath "$env:RUNNER_TEMP/ts"
-          $sdk = "$env:RUNNER_TEMP/sdk.zip"
-          curl.exe -fsSL --retry 3 'https://github.com/livekit/client-sdk-cpp/releases/download/v1.13.1/livekit-sdk-windows-x64-1.13.1.zip' -o $sdk
-          if ($LASTEXITCODE -or (Get-FileHash $sdk).Hash -ne '6696ee87c78b958bdbf70e5eb39bf85e1c7528ca2a707e6c13b042c8e4360b9d') { throw 'SDK digest mismatch' }
-          Expand-Archive $sdk -DestinationPath "$env:RUNNER_TEMP/sdk"
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          "VSROOT=$vs" >> $env:GITHUB_ENV
-      - name: Compile the headless voice test
-        shell: cmd
-        run: |
-          call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat"
-          if errorlevel 1 exit /b 1
-          cd /d "%RUNNER_TEMP%"
-          cl /nologo /std:c++20 /EHsc /MD /O2 /I"%GITHUB_WORKSPACE%\client" /I"%RUNNER_TEMP%\sdk\livekit-sdk-windows-x64-1.13.1\include" "%GITHUB_WORKSPACE%\tests\duplex.cpp" /Fe:"%RUNNER_TEMP%\ts\TinySpeak\probe.exe" /link /LIBPATH:"%RUNNER_TEMP%\sdk\livekit-sdk-windows-x64-1.13.1\lib" livekit.lib
-      - name: Connect two Windows guests to the home host
+      - uses: ./.github/actions/windows-voice-probe
+      - name: Connect two guests to the other Windows runner
         env:
           TEST_INVITE: ${{ needs.host.outputs.return_invite }}
         shell: pwsh

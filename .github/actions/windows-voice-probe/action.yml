@@ -1,0 +1,31 @@
+name: Prepare Windows voice probe
+description: Verify the published Windows ZIP and compile the matching test client.
+runs:
+  using: composite
+  steps:
+    - name: Download the published Windows package and its test SDK
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $resource = Get-Content -Raw client/TinySpeak.rc
+        if ($resource -notmatch 'ProductVersion",\s*"Patch ([0-9]+)') { throw 'Missing Windows patch number' }
+        $tag = "patch-$($Matches[1])"
+        $release = Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
+        $asset = $release.assets | Where-Object name -eq 'TinySpeak-Windows-x64.zip'
+        $package = "$env:RUNNER_TEMP/bundle.zip"
+        curl.exe -fsSL --retry 3 $asset.browser_download_url -o $package
+        if ($LASTEXITCODE -or $asset.digest -ne "sha256:$((Get-FileHash $package).Hash)") { throw 'Windows package digest mismatch' }
+        Expand-Archive $package -DestinationPath "$env:RUNNER_TEMP/ts"
+        $sdk = "$env:RUNNER_TEMP/sdk.zip"
+        curl.exe -fsSL --retry 3 'https://github.com/livekit/client-sdk-cpp/releases/download/v1.13.1/livekit-sdk-windows-x64-1.13.1.zip' -o $sdk
+        if ($LASTEXITCODE -or (Get-FileHash $sdk).Hash -ne '6696ee87c78b958bdbf70e5eb39bf85e1c7528ca2a707e6c13b042c8e4360b9d') { throw 'SDK digest mismatch' }
+        Expand-Archive $sdk -DestinationPath "$env:RUNNER_TEMP/sdk"
+        $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        "VSROOT=$vs" >> $env:GITHUB_ENV
+    - name: Compile the headless voice test
+      shell: cmd
+      run: |
+        call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat"
+        if errorlevel 1 exit /b 1
+        cd /d "%RUNNER_TEMP%"
+        cl /nologo /std:c++20 /EHsc /MD /O2 /I"%GITHUB_WORKSPACE%\client" /I"%RUNNER_TEMP%\sdk\livekit-sdk-windows-x64-1.13.1\include" "%GITHUB_WORKSPACE%\tests\duplex.cpp" /Fe:"%RUNNER_TEMP%\ts\TinySpeak\probe.exe" /link /LIBPATH:"%RUNNER_TEMP%\sdk\livekit-sdk-windows-x64-1.13.1\lib" livekit.lib
