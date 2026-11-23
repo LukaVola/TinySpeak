@@ -5,11 +5,11 @@ import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { writeFile, mkdir } from 'node:fs/promises';
-import { resolve, join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { resolve, join } from 'node:path';
 import { createInterface } from 'node:readline';
 
-const [binary, directory, returnProbe] = process.argv.slice(2);
+const [binary, directory, mode] = process.argv.slice(2);
+const requestReturn = mode === '--request-return';
 if (!binary || !directory) throw new Error('Expected a host executable and a temporary test directory');
 const profile = join(directory, 'profile');
 await mkdir(profile, {recursive:true});
@@ -46,9 +46,9 @@ try {
     const route=Buffer.from(host.route,'base64url');
     route.fill(0,0,8);
     await writeFile(join(directory,'invite'),`TS2-${route.toString('base64url')}.${host.ticket}.${code}`);
-    const end=Date.now()+5*60*1000;
+    const end=Date.now()+(requestReturn ? 5 : 10)*60*1000;
     let answered = false, verified = false, returned = false, acknowledged = false;
-    while ((!verified || (returnProbe && !acknowledged)) && Date.now() < end) {
+    while ((!verified || (requestReturn && !acknowledged)) && Date.now() < end) {
         const result=await request('poll');
         for (const event of result.events || []) {
             if(event.type !== 'chat' || event.room !== text) continue;
@@ -58,22 +58,17 @@ try {
             }
             if(answered && event.text === 'duplex audio verified') verified = true;
             if(returned && event.text === 'return acknowledged') acknowledged = true;
-            if(returnProbe && verified && !returned && event.text.startsWith('return TS2-')) {
+            if(requestReturn && verified && !returned && event.text.startsWith('return TS2-')) {
                 const invite=event.text.slice(7);
                 assert.match(invite,/^TS2-[A-Za-z0-9_-]{32}\.endpoint[a-z2-7]{50,192}\.[A-Za-z0-9]{16}$/);
                 assert.ok(Buffer.from(invite.slice(4,36),'base64url').subarray(0,8).every(b=>b===0),'Expected a relay-only test fixture');
-                const path=join(directory,'return-invite');
-                await writeFile(path,invite);
-                const script=fileURLToPath(new URL('./internet-client.mjs',import.meta.url));
-                const back=spawn(process.execPath,[script,dirname(resolve(binary)),resolve(returnProbe),path],{stdio:'inherit',windowsHide:true});
-                const [status]=await once(back,'exit',{signal:AbortSignal.timeout(100000)});
-                assert.equal(status,0,'Remote client could not use the home host');
-                await request('chat',{code,room:text,text:'return verified'});
+                await writeFile(join(directory,'return-invite'),invite);
+                await request('chat',{code,room:text,text:'return received'});
                 returned=true;
             }
         }
     }
-    assert.ok(verified && (!returnProbe || acknowledged),'Timed out waiting for the independent client and its two audio directions');
+    assert.ok(verified && (!requestReturn || acknowledged),'Timed out waiting for the independent client and its two audio directions');
     await writeFile(join(directory,'passed'),'chat and duplex audio passed');
 } finally {
     reader.close();

@@ -6,7 +6,58 @@ on:
 permissions:
   contents: read
 jobs:
-  host-and-guest:
+  host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      return_invite: ${{ steps.verify.outputs.return_invite }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - name: Build the independent Internet host
+        working-directory: server
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/tinyspeak"
+          CGO_ENABLED=0 go build -trimpath -tags embedded_voice -o "$RUNNER_TEMP/tinyspeak/host" .
+          curl -fsSL --retry 3 https://github.com/n0-computer/dumbpipe/releases/download/v0.40.2/dumbpipe-v0.40.2-linux-x86_64.tar.gz -o "$RUNNER_TEMP/link.tar.gz"
+          echo "25823c4fb7d10430740a1b57111108c6950c2eb901874a7ebd894bda5894089d  $RUNNER_TEMP/link.tar.gz" | sha256sum -c
+          tar -xzf "$RUNNER_TEMP/link.tar.gz" -C "$RUNNER_TEMP/tinyspeak"
+          install -m 755 "$(find "$RUNNER_TEMP/tinyspeak" -type f -name dumbpipe -print -quit)" "$RUNNER_TEMP/tinyspeak/TinySpeak Link.exe"
+      - name: Start a disposable room on a separate network
+        id: start
+        run: |
+          set -eu
+          base="$RUNNER_TEMP/tinyspeak"
+          node tests/internet-host.mjs "$base/host" "$base" --request-return >"$base/test.log" 2>&1 </dev/null &
+          for attempt in {1..45}; do
+            if test -s "$base/invite"; then echo "invite=$(cat "$base/invite")" >> "$GITHUB_OUTPUT"; exit 0; fi
+            sleep 1
+          done
+          tail -20 "$base/test.log"
+          exit 1
+      - name: Test invite ${{ steps.start.outputs.invite }}
+        id: verify
+        run: |
+          set -eu
+          base="$RUNNER_TEMP/tinyspeak"
+          for attempt in {1..155}; do
+            if test -s "$base/passed"; then
+              echo "return_invite=$(cat "$base/return-invite")" >> "$GITHUB_OUTPUT"
+              cat "$base/passed"
+              exit 0
+            fi
+            sleep 2
+          done
+          tail -20 "$base/test.log"
+          exit 1
+  windows-guests:
+    needs: host
     runs-on: windows-2022
     timeout-minutes: 15
     steps:
@@ -39,35 +90,14 @@ jobs:
           if errorlevel 1 exit /b 1
           cd /d "%RUNNER_TEMP%"
           cl /nologo /std:c++20 /EHsc /MD /O2 /I"%GITHUB_WORKSPACE%\client" /I"%RUNNER_TEMP%\sdk\livekit-sdk-windows-x64-1.13.1\include" "%GITHUB_WORKSPACE%\tests\duplex.cpp" /Fe:"%RUNNER_TEMP%\ts\TinySpeak\probe.exe" /link /LIBPATH:"%RUNNER_TEMP%\sdk\livekit-sdk-windows-x64-1.13.1\lib" livekit.lib
-      - name: Start a disposable room on the remote Windows network
-        id: start
+      - name: Connect two Windows guests to the home host
+        env:
+          TEST_INVITE: ${{ needs.host.outputs.return_invite }}
         shell: pwsh
         run: |
-          $dir = (New-Item -Type Directory "$env:RUNNER_TEMP/fixture").FullName
           $app = "$env:RUNNER_TEMP/ts/TinySpeak"
-          $script = Join-Path $env:GITHUB_WORKSPACE 'tests\internet-host.mjs'
-          $argsList = @($script, "$app/TinySpeak Host.exe", $dir, "$app/probe.exe") | ForEach-Object { '"' + $_ + '"' }
-          $proc = Start-Process -FilePath (Get-Command node).Source -ArgumentList ($argsList -join ' ') -WindowStyle Hidden -RedirectStandardOutput "$dir/out.txt" -RedirectStandardError "$dir/err.txt" -PassThru
-          foreach ($n in 1..50) {
-            if (Test-Path "$dir/invite") {
-              "invite=$([IO.File]::ReadAllText("$dir/invite"))" >> $env:GITHUB_OUTPUT
-              exit 0
-            }
-            if ($proc.HasExited) { break }
-            Start-Sleep 1
-          }
-          Get-Content "$dir/err.txt" -Tail 20
-          throw 'The test host could not advertise'
-      - name: Test invite ${{ steps.start.outputs.invite }}
-        shell: pwsh
-        run: |
-          $dir = "$env:RUNNER_TEMP/fixture"
-          foreach ($n in 1..155) {
-            if (Test-Path "$dir/passed") {
-              Get-Content "$dir/passed", "$dir/out.txt"
-              exit 0
-            }
-            Start-Sleep 2
-          }
-          Get-Content "$dir/out.txt", "$dir/err.txt" -Tail 20
-          throw 'Cross-network test did not finish'
+          if ($env:TEST_INVITE -cnotmatch '^TS2-[A-Za-z0-9_-]{32}\.endpoint[a-z2-7]{50,192}\.[A-Za-z0-9]{16}$') { throw 'Missing the disposable Internet invite' }
+          $file = "$env:RUNNER_TEMP/return-invite"
+          [IO.File]::WriteAllText($file,$env:TEST_INVITE)
+          node tests/internet-client.mjs $app "$app/probe.exe" $file
+          if ($LASTEXITCODE) { throw 'The Windows guests did not receive both audio streams' }
