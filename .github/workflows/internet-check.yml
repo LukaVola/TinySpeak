@@ -1,4 +1,4 @@
-name: Internet voice and chat fixture
+name: Verify Windows chat and voice across the Internet
 on:
   workflow_dispatch:
   push:
@@ -6,43 +6,68 @@ on:
 permissions:
   contents: read
 jobs:
-  host:
-    runs-on: ubuntu-latest
+  host-and-guest:
+    runs-on: windows-2022
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
         with:
-          go-version-file: server/go.mod
-          cache-dependency-path: server/go.sum
-      - name: Build the independent Internet host
-        working-directory: server
+          persist-credentials: false
+      - name: Download the published Windows package and its test SDK
+        shell: pwsh
         run: |
-          set -eu
-          mkdir -p "$RUNNER_TEMP/tinyspeak"
-          CGO_ENABLED=0 go build -trimpath -tags embedded_voice -o "$RUNNER_TEMP/tinyspeak/host" .
-          curl -fsSL https://github.com/n0-computer/dumbpipe/releases/download/v0.40.2/dumbpipe-v0.40.2-linux-x86_64.tar.gz -o "$RUNNER_TEMP/link.tar.gz"
-          echo "25823c4fb7d10430740a1b57111108c6950c2eb901874a7ebd894bda5894089d  $RUNNER_TEMP/link.tar.gz" | sha256sum -c
-          tar -xzf "$RUNNER_TEMP/link.tar.gz" -C "$RUNNER_TEMP/tinyspeak"
-          install -m 755 "$(find "$RUNNER_TEMP/tinyspeak" -type f -name dumbpipe -print -quit)" "$RUNNER_TEMP/tinyspeak/TinySpeak Link.exe"
-      - name: Start a fresh, synthetic room
+          $ErrorActionPreference = 'Stop'
+          $resource = Get-Content -Raw client/TinySpeak.rc
+          if ($resource -notmatch 'ProductVersion",\s*"Patch ([0-9]+)') { throw 'Missing Windows patch number' }
+          $tag = "patch-$($Matches[1])"
+          $release = Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
+          $asset = $release.assets | Where-Object name -eq 'TinySpeak-Windows-x64.zip'
+          $package = "$env:RUNNER_TEMP/bundle.zip"
+          curl.exe -fsSL --retry 3 $asset.browser_download_url -o $package
+          if ($LASTEXITCODE -or $asset.digest -ne "sha256:$((Get-FileHash $package).Hash)") { throw 'Windows package digest mismatch' }
+          Expand-Archive $package -DestinationPath "$env:RUNNER_TEMP/ts"
+          $sdk = "$env:RUNNER_TEMP/sdk.zip"
+          curl.exe -fsSL --retry 3 'https://github.com/livekit/client-sdk-cpp/releases/download/v1.13.1/livekit-sdk-windows-x64-1.13.1.zip' -o $sdk
+          if ($LASTEXITCODE -or (Get-FileHash $sdk).Hash -ne '6696ee87c78b958bdbf70e5eb39bf85e1c7528ca2a707e6c13b042c8e4360b9d') { throw 'SDK digest mismatch' }
+          Expand-Archive $sdk -DestinationPath "$env:RUNNER_TEMP/sdk"
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          "VSROOT=$vs" >> $env:GITHUB_ENV
+      - name: Compile the headless voice test
+        shell: cmd
+        run: |
+          call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          cd /d "%RUNNER_TEMP%"
+          cl /nologo /std:c++20 /EHsc /MD /O2 /I"%GITHUB_WORKSPACE%\client" /I"%RUNNER_TEMP%\sdk\livekit-sdk-windows-x64-1.13.1\include" "%GITHUB_WORKSPACE%\tests\duplex.cpp" /Fe:"%RUNNER_TEMP%\ts\TinySpeak\probe.exe" /link /LIBPATH:"%RUNNER_TEMP%\sdk\livekit-sdk-windows-x64-1.13.1\lib" livekit.lib
+      - name: Start a disposable room on the remote Windows network
         id: start
+        shell: pwsh
         run: |
-          set -eu
-          base="$RUNNER_TEMP/tinyspeak"
-          node tests/internet-host.mjs "$base/host" "$base" >"$base/test.log" 2>&1 </dev/null &
-          for attempt in {1..45}; do
-            if test -s "$base/invite"; then echo "invite=$(cat "$base/invite")" >> "$GITHUB_OUTPUT"; exit 0; fi
-            sleep 1
-          done
-          tail -20 "$base/test.log"
-          exit 1
+          $dir = (New-Item -Type Directory "$env:RUNNER_TEMP/fixture").FullName
+          $app = "$env:RUNNER_TEMP/ts/TinySpeak"
+          $script = Join-Path $env:GITHUB_WORKSPACE 'tests\internet-host.mjs'
+          $argsList = @($script, "$app/TinySpeak Host.exe", $dir, "$app/probe.exe") | ForEach-Object { '"' + $_ + '"' }
+          $proc = Start-Process -FilePath (Get-Command node).Source -ArgumentList ($argsList -join ' ') -WindowStyle Hidden -RedirectStandardOutput "$dir/out.txt" -RedirectStandardError "$dir/err.txt" -PassThru
+          foreach ($n in 1..50) {
+            if (Test-Path "$dir/invite") {
+              "invite=$([IO.File]::ReadAllText("$dir/invite"))" >> $env:GITHUB_OUTPUT
+              exit 0
+            }
+            if ($proc.HasExited) { break }
+            Start-Sleep 1
+          }
+          Get-Content "$dir/err.txt" -Tail 20
+          throw 'The test host could not advertise'
       - name: Test invite ${{ steps.start.outputs.invite }}
+        shell: pwsh
         run: |
-          base="$RUNNER_TEMP/tinyspeak"
-          for attempt in {1..150}; do
-            if test -s "$base/passed"; then cat "$base/passed"; exit 0; fi
-            sleep 2
-          done
-          tail -20 "$base/test.log"
-          exit 1
+          $dir = "$env:RUNNER_TEMP/fixture"
+          foreach ($n in 1..155) {
+            if (Test-Path "$dir/passed") {
+              Get-Content "$dir/passed", "$dir/out.txt"
+              exit 0
+            }
+            Start-Sleep 2
+          }
+          Get-Content "$dir/out.txt", "$dir/err.txt" -Tail 20
+          throw 'Cross-network test did not finish'

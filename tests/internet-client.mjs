@@ -5,8 +5,9 @@ import {once} from 'node:events';
 import {readFile} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {createInterface} from 'node:readline';
+import {setTimeout as delay} from 'node:timers/promises';
 
-const [directory, probePath, invitationFile] = process.argv.slice(2);
+const [directory, probePath, invitationFile, returnInviteFile] = process.argv.slice(2);
 const folder = resolve(directory);
 const invite = (await readFile(invitationFile,'utf8')).trim();
 const code = invite.split('.').at(-1);
@@ -54,6 +55,20 @@ try {
         if(audio.exitCode===null && !audio.signalCode) audio.kill();
     }
     await a.request('chat',{code,room:'TEST0000CHAT',text:'duplex audio verified'});
+    if (returnInviteFile) {
+        await delay(250);
+        const offer=(await readFile(returnInviteFile,'utf8')).trim();
+        await a.request('chat',{code,room:'TEST0000CHAT',text:'return '+offer});
+        let returned=false;
+        const until=Date.now()+100000;
+        while(!returned && Date.now()<until) {
+            const result=await b.request('poll');
+            returned=(result.events||[]).some(e=>e.text==='return verified');
+        }
+        assert.ok(returned,'The remote Windows guests did not confirm the home host');
+        await b.request('chat',{code,room:'TEST0000CHAT',text:'return acknowledged'});
+        console.log('PASS: remote Windows guests connected back to the home host and verified chat and duplex audio');
+    }
     console.log('PASS: Internet invite, text and duplex audio on separate networks');
 } finally {
     for(const child of children) child.stdin.end();

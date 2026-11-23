@@ -184,6 +184,8 @@ private:
     std::map<std::string, Owned> owned;
     std::map<std::string, std::string> bookmarks, available;
     std::map<std::string, std::string> bookmarkInvites;
+    std::vector<std::string> probingBookmarks;
+    std::string lastProbedBookmark;
     std::vector<std::pair<std::string, std::string>> serverRows;
     Json state = Json::object();
     std::unordered_map<HTREEITEM, Node> nodes;
@@ -558,11 +560,14 @@ void App::tickHelpers() {
         statusText(L"The connection to the host was lost.");
     }
     if (const auto scan = probes.read(); scan && scan->contains("catalog")) {
-        std::map<std::string, std::string> live;
+        auto live = available;
+        for (const auto& checked : probingBookmarks) live.erase(checked);
+        std::erase_if(live, [&](const auto& item) { return !bookmarkInvites.contains(item.first); });
         for (const auto& item : arrayOr(*scan, "catalog")) {
             const auto code = item.value("code", "");
             if (bookmarkInvites.contains(code)) live[code] = item.value("name", "");
         }
+        if (!onHost && connected && bookmarkInvites.contains(active())) live[active()] = bookmarks[active()];
         if (live != available) {
             available = std::move(live);
             refreshServers();
@@ -576,8 +581,19 @@ void App::probeBookmarks() {
     if (!directHosting || bookmarkInvites.empty() || probes.running() || now < probeAt) return;
     probeAt = now + 20000;
     std::wstring arguments = L"probe";
-    for (const auto& [_, invite] : bookmarkInvites) arguments += L" " + wide(invite);
-    probes.start(arguments);
+    probingBookmarks.clear();
+    auto it = bookmarkInvites.upper_bound(lastProbedBookmark);
+    const auto current = onHost ? std::string{} : active();
+    for (size_t count = 0; count < bookmarkInvites.size() && probingBookmarks.size() < 16; ++count) {
+        if (it == bookmarkInvites.end()) it = bookmarkInvites.begin();
+        lastProbedBookmark = it->first;
+        if (it->first != current) {
+            probingBookmarks.push_back(it->first);
+            arguments += L" " + wide(it->second);
+        }
+        ++it;
+    }
+    if (!probingBookmarks.empty()) probes.start(arguments);
 }
 
 void App::advertise(const Owned& item) {

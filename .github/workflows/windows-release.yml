@@ -1,0 +1,75 @@
+name: Publish Windows patch
+on:
+  push:
+    branches: ['ship/patch-*']
+jobs:
+  release:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - name: Fetch pinned client dependencies
+        shell: pwsh
+        run: |
+          $deps = New-Item -Type Directory "$env:RUNNER_TEMP/ts-deps"
+          function Get-Verified($source, $file, $sha) {
+            curl.exe -fsSL --retry 3 $source -o "$deps/$file"
+            if ($LASTEXITCODE -or (Get-FileHash "$deps/$file").Hash -ne $sha) { throw "Invalid download of $file" }
+          }
+          Get-Verified 'https://github.com/livekit/client-sdk-cpp/releases/download/v1.13.1/livekit-sdk-windows-x64-1.13.1.zip' 'sdk.zip' '6696ee87c78b958bdbf70e5eb39bf85e1c7528ca2a707e6c13b042c8e4360b9d'
+          Get-Verified 'https://github.com/nlohmann/json/releases/download/v3.12.0/json.hpp' 'json.hpp' 'aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63'
+          Get-Verified 'https://raw.githubusercontent.com/mackron/miniaudio/0.11.23/miniaudio.h' 'miniaudio.h' '7e4f3f13c8fe66df2080ac3dd12a89193e3c2463cb7f067c798abd7331cd8ee6'
+          Expand-Archive "$deps/sdk.zip" -DestinationPath $deps
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          "VSROOT=$vs" >> $env:GITHUB_ENV
+      - name: Build and test
+        shell: cmd
+        run: |
+          call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          call client\build.cmd "%RUNNER_TEMP%\ts-deps\livekit-sdk-windows-x64-1.13.1" "%RUNNER_TEMP%\ts-deps" "%RUNNER_TEMP%\ts-bin"
+          if errorlevel 1 exit /b 1
+          call server\build-windows.cmd "%RUNNER_TEMP%\ts-bin"
+          if errorlevel 1 exit /b 1
+          cd server
+          set CGO_ENABLED=0
+          go test ./...
+          if errorlevel 1 exit /b 1
+          go test -tags embedded_voice ./...
+          if errorlevel 1 exit /b 1
+          echo REDIST=%VCToolsRedistDir%>> "%GITHUB_ENV%"
+      - name: Package and publish the portable ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REF_NAME -notmatch '^ship/patch-([1-9][0-9]*)$') { throw 'Invalid patch branch' }
+          $version = "Patch $($Matches[1])"
+          $tag = $env:GITHUB_REF_NAME.Substring(5)
+          $source = "$env:RUNNER_TEMP/ts-bin"
+          if ((Get-Item "$source/TinySpeak.exe").VersionInfo.ProductVersion -ne $version) { throw 'Release name differs from the Windows version resource' }
+          $app = New-Item -Type Directory "$env:RUNNER_TEMP/ts-package/TinySpeak" -Force
+          foreach ($file in 'Launch TinySpeak.exe','TinySpeak.exe','TinySpeak Host.exe','TinySpeak Link.exe','kanal-relay.exe','livekit.dll','livekit_ffi.dll') {
+            Copy-Item -LiteralPath "$source/$file" -Destination $app
+          }
+          $crt = Get-ChildItem -Directory "$env:REDIST/x64" | Where-Object Name -match '^Microsoft\.VC[0-9]+\.CRT$' | Select-Object -First 1
+          foreach ($file in 'msvcp140.dll','msvcp140_atomic_wait.dll','vcruntime140.dll','vcruntime140_1.dll') {
+            Copy-Item -LiteralPath (Join-Path $crt.FullName $file) -Destination $app
+          }
+          Copy-Item README.md,Licenses -Recurse -Destination $app
+          $asset = "$env:RUNNER_TEMP/TinySpeak-Windows-x64.zip"
+          [IO.Compression.ZipFile]::CreateFromDirectory($app.FullName,$asset,[IO.Compression.CompressionLevel]::Optimal,$true)
+          $notes = 'Extract the complete TinySpeak-Windows-x64.zip and open **Launch TinySpeak.exe**. To talk across networks, use **New server → Menu → Copy invite code** and have your friend paste the full code into **Join**. Both chat and voice can use the bundled encrypted Internet connection.'
+          $notesFile = "$env:RUNNER_TEMP/patch-notes.md"
+          $notes | Set-Content -Encoding utf8 $notesFile
+          gh release create $tag $asset --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --prerelease --title $version --notes-file $notesFile
+          if ($LASTEXITCODE) { throw 'Could not publish the release' }
