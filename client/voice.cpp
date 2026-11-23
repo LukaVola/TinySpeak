@@ -1,5 +1,4 @@
 #include "voice.h"
-#include "voice_mix.h"
 
 #include <windows.h>
 #include <algorithm>
@@ -24,11 +23,11 @@
 #define MA_NO_AVX2
 #define MA_NO_AVX512F
 #define MINIAUDIO_IMPLEMENTATION
-#include "miniaudio.h"
+#include "playback_effects.h"
 
 namespace {
-constexpr int sampleRate = 48000;
-constexpr int frameSize = sampleRate / 100;
+constexpr int sampleRate = voiceSampleRate;
+constexpr int frameSize = voiceBlockFrames;
 
 struct Ring {
     std::array<std::int16_t, frameSize * 12> samples{};
@@ -96,6 +95,7 @@ struct Connection final : livekit::RoomDelegate {
     ma_device device{};
     bool activeDevice = false;
     Ring input, reference;
+    PlaybackEffects playbackEffects;
     HANDLE wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     std::jthread processing;
     std::atomic_bool stopping{false};
@@ -153,6 +153,8 @@ struct Connection final : livekit::RoomDelegate {
 
     void mix(std::int16_t* output, ma_uint32 frames) {
         const int volume = owner.outputGain.load();
+        const auto equalizer = owner.equalizerDb.load(std::memory_order_relaxed);
+        const bool normalize = owner.normalizePlayback.load(std::memory_order_relaxed);
         const auto participantVolumes = gains.load();
         std::unique_lock lock(peersMutex, std::try_to_lock);
         while (frames) {
@@ -170,9 +172,7 @@ struct Connection final : livekit::RoomDelegate {
                     mixVoiceSamples(sum.data(), samples.data(), count, gain);
                 }
             }
-            for (ma_uint32 i = 0; i < n; ++i) {
-                output[i] = static_cast<std::int16_t>(std::clamp(sum[i] * volume / 100, -32768, 32767));
-            }
+            playbackEffects.render({sum.data(), n}, output, volume, equalizer, normalize);
             reference.write(output, n);
             frames -= n;
             output += n;

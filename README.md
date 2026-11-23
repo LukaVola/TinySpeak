@@ -2,7 +2,7 @@
 
 TinySpeak is a portable voice and text chat app for small groups on 64-bit Windows. Your PC hosts the server while TinySpeak is open. You and your friends only need a username and an invite.
 
-**[Download Patch 12 for Windows x64 (ZIP)](https://github.com/LukaVola/TinySpeak/releases/download/patch-12/TinySpeak-Windows-x64.zip)**
+**[Download Patch 13 for Windows x64 (ZIP)](https://github.com/LukaVola/TinySpeak/releases/download/patch-13/TinySpeak-Windows-x64.zip)**
 
 ## Start a conversation
 
@@ -22,7 +22,9 @@ The full Internet invite starts with **TS2-** and contains the information neede
 - The microphone icon in the footer toggles mute. A red slash shows when the microphone is muted.
 - The footer shows the microphone gain and app output volume as percentages. The thin meter below the microphone slider shows the input signal level, even while muted.
 - **5% volume steps (1% from 0% to 5%)** is on by default. It applies to the microphone, app output and participant volume. The microphone is capped at 150% and the app output at 110%. Turn this option off for 1% steps across the full range.
-- Right-click a person in your voice room to **Mute for me**, **Unmute for me**, or adjust **Participant volume**. The volume slider previews the change, **OK** saves it, and **Cancel** restores the previous level. Unmuting restores the saved level.
+- Right-click a person in your voice room to **Mute for me**, **Unmute for me**, or adjust **Participant volume** from **0% to 150%**. The volume slider previews the change, **OK** saves it, and **Cancel** restores the previous level. Unmuting restores the saved level.
+- Open **Menu → Settings → Playback equalizer and normalization…** to adjust four incoming voice bands from **−12 to +12 dB**. The bands cover 1–200 Hz, 201–400 Hz, 401–1,000 Hz and 1,001–20,000 Hz. All four start at 0 dB.
+- **Normalize incoming voice (limit sudden peaks)** softens sudden sounds such as a microphone knock and gradually restores the listening level. It starts off. Both settings preview during the call and save locally when you confirm both dialogs.
 - Saved levels apply only to your playback. TinySpeak remembers the person across reconnects and username changes when both clients and the relay are on Patch 3 or later. For older clients, TinySpeak uses the name within the current server.
 - Choose the input device, output device and microphone mode in **Menu → Settings**. The default push-to-talk key is **F8**.
 - **Microphone threshold** suppresses microphone audio below the chosen level in any microphone mode. **30 dB** is the default, **70 dB** is the maximum, and **0 dB** turns the gate off. The setting uses a digital signal scale starting at −70 dBFS. A setting of 30 dB corresponds to −40 dBFS RMS. **OK** saves the setting locally.

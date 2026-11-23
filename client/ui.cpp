@@ -291,7 +291,7 @@ struct Form {
                     const int position = static_cast<int>(SendMessageW(control, TBM_GETPOS, 0, 0));
                     if (position != found->sliderScale.position(found->selected)) {
                         found->selected = found->sliderScale.value(position);
-                        putText(found->valueLabel, std::to_wstring(found->selected) + found->sliderSuffix);
+                        putText(found->valueLabel, found->sliderText());
                         if (found->onChange) found->onChange(found->selected);
                     }
                     return TRUE;
@@ -326,6 +326,20 @@ struct Form {
         if (message == WM_CLOSE || (message == WM_COMMAND && LOWORD(wParam) == IDCANCEL)) {
             EndDialog(window, IDCANCEL);
             return TRUE;
+        }
+        if (self && self->fields && message == WM_COMMAND && HIWORD(wParam) == BN_CLICKED && lParam) {
+            for (auto& field : *self->fields) {
+                if (field.input != reinterpret_cast<HWND>(lParam)) continue;
+                if (field.type == Field::Action && field.onClick) {
+                    field.onClick(window);
+                    return TRUE;
+                }
+                if (field.type == Field::Check && field.onChange) {
+                    field.selected = SendMessageW(field.input, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                    field.onChange(field.selected);
+                    return TRUE;
+                }
+            }
         }
         if (message == WM_COMMAND && LOWORD(wParam) == IDOK && self) {
             if (self->fields) {
@@ -364,7 +378,7 @@ struct Form {
         } else {
             for (auto& f : *fields) {
                 if (!f.visible) continue;
-                if (f.type != Field::Check) {
+                if (f.type != Field::Check && f.type != Field::Action) {
                     auto label = control(window, L"STATIC", f.label.c_str(), SS_LEFT, 0);
                     MoveWindow(label, x, row, bounds.right - x * 2, y + 3, TRUE);
                     row += y + 3;
@@ -383,10 +397,12 @@ struct Form {
                     f.input = control(window, L"BUTTON", f.label.c_str(), style | BS_AUTOCHECKBOX, 100 + row);
                     SetWindowSubclass(f.input, darkCheck, 1, 0);
                     SendMessageW(f.input, BM_SETCHECK, f.selected ? BST_CHECKED : BST_UNCHECKED, 0);
+                } else if (f.type == Field::Action) {
+                    f.input = control(window, L"BUTTON", f.label.c_str(), style | BS_OWNERDRAW, 100 + row);
                 } else {
                     f.input = control(window, TRACKBAR_CLASSW, f.label.c_str(), style | TBS_NOTICKS, 100 + row);
                     configureSlider(f.input, f.sliderScale, f.selected, f.sliderPageStep);
-                    const auto value = std::to_wstring(f.selected) + f.sliderSuffix;
+                    const auto value = f.sliderText();
                     f.valueLabel = control(window, L"STATIC", value.c_str(), SS_RIGHT | SS_CENTERIMAGE, 0);
                     int s = unit.right * 13;
                     MoveWindow(f.valueLabel, bounds.right - x - s, row, s, height, TRUE);
@@ -418,7 +434,7 @@ struct Form {
 
 bool form(HWND owner, const wchar_t* title, std::vector<Field>& fields) {
     int height = 36;
-    for (const auto& f : fields) if (f.visible) height += f.type == Field::Check ? 17 : 27;
+    for (const auto& f : fields) if (f.visible) height += f.type == Field::Check || f.type == Field::Action ? 17 : 27;
     EmptyDialog layout(278, static_cast<short>(height));
     Form data{title, &fields, nullptr};
     return DialogBoxIndirectParamW(GetModuleHandleW(nullptr), &layout.dialog, owner, Form::procedure,

@@ -1,5 +1,6 @@
 #pragma once
 #include "voice_gate.h"
+#include "voice_mix.h"
 
 #include <array>
 #include <atomic>
@@ -45,6 +46,8 @@ public:
     // 0 = activation by voice, 1 = push to talk, 2 = open microphone.
     std::atomic_int inputGain{100}, outputGain{100}, mode{0}, level{0}, threshold{microphoneThresholdDefault};
     std::atomic_int bitrateKbps{defaultVoiceBitrate};
+    std::atomic<EqualizerGains> equalizerDb{EqualizerGains{}};
+    std::atomic_bool normalizePlayback{false};
     std::atomic_bool muted{true}, push{false}, talking{false}, permitted{false};
     std::atomic_int status{0}; // 0 idle, 1 connecting, 2 connected, 3 audio failure, 4 listening only
 

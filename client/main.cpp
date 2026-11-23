@@ -170,6 +170,8 @@ private:
     bool textClosed = false;
     bool directHosting = true, hostStarting = false, onHost = false, hostInternet = false, parkedRegistered = false;
     bool fivePercentSteps = true;
+    EqualizerGains savedEqualizer{};
+    bool savedNormalization = false;
     int color = 0, pushKey = VK_F8, audioStatus = -1, displayedLevel = -1;
     bool pushWasDown = false, displayedTalk = false;
     ULONGLONG clockNext = 0, retryAt = 0, joinUntil = 0, nextRegistration = 0, probeAt = 0, guestOfflineSince = 0;
@@ -245,6 +247,7 @@ private:
     void promptCreate();
     void promptProfile();
     void promptSettings();
+    void promptPlayback(HWND parent);
     void serverPicker();
     void popupActions();
     void addRoom(bool text);
@@ -274,6 +277,16 @@ void App::load() {
     fs::create_directories(directory / L"logs", ec);
     auto doc = loadJson(directory / L"settings.json");
     if (!doc.is_object()) doc = Json::object();
+    const auto bands = arrayOr(doc, "playback_eq_db");
+    for (std::size_t i = 0; i < std::min(bands.size(), savedEqualizer.size()); ++i) {
+        if (bands[i].is_number_integer()) {
+            const auto value = bands[i].get<std::int64_t>();
+            if (value >= -equalizerLimitDb && value <= equalizerLimitDb) savedEqualizer[i] = static_cast<std::int8_t>(value);
+        }
+    }
+    savedNormalization = doc.contains("normalize_playback") && doc["normalize_playback"] == true;
+    audio.equalizerDb = savedEqualizer;
+    audio.normalizePlayback = savedNormalization;
     try {
         name = doc.value("name", "");
         if (name.empty()) name = "Guest" + randomCode(4);
@@ -321,7 +334,7 @@ void App::load() {
             for (const auto& [key, gain] : volumes->items()) {
                 if (gain.is_number_integer()) {
                     const auto percent = gain.get<std::int64_t>();
-                    if (percent >= 0 && percent < 100) savedVolumes.emplace(key, static_cast<int>(percent));
+                    if (percent >= 0 && percent <= maxParticipantGain && percent != 100) savedVolumes.emplace(key, static_cast<int>(percent));
                 }
             }
         }
@@ -364,6 +377,7 @@ void App::save() {
         {"local_chat", archiveChat}, {"save_owned", retainOwned}, {"microphone", utf8(microphone)},
         {"playback", utf8(playback)}, {"audio_mode", audio.mode.load()}, {"mic_gain", audio.inputGain.load()},
         {"output_gain", audio.outputGain.load()}, {"mic_threshold", audio.threshold.load()},
+        {"playback_eq_db", savedEqualizer}, {"normalize_playback", savedNormalization},
         {"voice_bitrate_kbps", audio.bitrateKbps.load()}, {"five_percent_steps", fivePercentSteps}, {"ptt", pushKey}};
     if (rememberColor) doc["color"] = color;
     if (remember) {
@@ -822,7 +836,7 @@ void App::promptParticipantVolume(const std::string& session) {
     previewPeer = key;
     previewVolume = original;
     std::vector<Field> fields{{Field::Slider, L"Volume for " + username, L"", {}, original}};
-    fields[0].sliderScale.fivePercentSteps = fivePercentSteps;
+    fields[0].sliderScale = {maxParticipantGain, fivePercentSteps};
     fields[0].sliderPageStep = 1;
     fields[0].onChange = [this](int value) {
         previewVolume = value;
@@ -832,7 +846,7 @@ void App::promptParticipantVolume(const std::string& session) {
     if (confirmed) {
         savedVolumes.erase(legacy);
         const int value = fields[0].selected;
-        if (value < 100) savedVolumes[key] = value;
+        if (value != 100) savedVolumes[key] = value;
         else savedVolumes.erase(key);
         statusText(username + L" volume: " + percentText(value));
         saveVoicePreferences();
@@ -1123,8 +1137,38 @@ void App::promptProfile() {
     }
 }
 
+void App::promptPlayback(HWND parent) {
+    const auto original = audio.equalizerDb.load();
+    const bool originalNormalize = audio.normalizePlayback.load();
+    constexpr std::array labels{L"1–200 Hz", L"201–400 Hz", L"401–1,000 Hz", L"1,001–20,000 Hz"};
+    std::vector<Field> fields;
+    for (std::size_t i = 0; i < labels.size(); ++i) {
+        Field field{Field::Slider, labels[i], L"", {}, original[i]};
+        field.sliderScale = {equalizerLimitDb, false, -equalizerLimitDb};
+        field.sliderSuffix = L" dB";
+        field.sliderPageStep = 1;
+        field.onChange = [this, i](int value) {
+            auto gains = audio.equalizerDb.load();
+            gains[i] = static_cast<std::int8_t>(value);
+            audio.equalizerDb = gains;
+        };
+        fields.push_back(std::move(field));
+    }
+    fields.push_back({Field::Check, L"Normalize incoming voice (limit sudden peaks)", L"", {}, originalNormalize});
+    fields.back().onChange = [this](int checked) { audio.normalizePlayback = checked != 0; };
+    if (!form(parent, L"Playback equalizer", fields)) {
+        audio.equalizerDb = original;
+        audio.normalizePlayback = originalNormalize;
+        return;
+    }
+    EqualizerGains gains{};
+    for (std::size_t i = 0; i < gains.size(); ++i) gains[i] = static_cast<std::int8_t>(fields[i].selected);
+    audio.equalizerDb = gains;
+    audio.normalizePlayback = fields.back().selected != 0;
+}
+
 void App::promptSettings() {
-    enum SettingField { RelayAddress, InputDevice, OutputDevice, InputMode, Threshold, TalkKey, Bitrate, FivePercentSteps,
+    enum SettingField { RelayAddress, InputDevice, OutputDevice, PlaybackEffectsField, InputMode, Threshold, TalkKey, Bitrate, FivePercentSteps,
         RememberServers, RememberColor, ArchiveChat, RetainOwned, RegisterLinks };
     auto [mics, speakers] = audio.devices();
     auto deviceField = [](const wchar_t* label, const std::vector<AudioDevice>& devices, const std::wstring& current) {
@@ -1146,6 +1190,7 @@ void App::promptSettings() {
         {Field::Text, L"Relay address", address},
         deviceField(L"Microphone", mics, microphone),
         deviceField(L"Headphones or speakers", speakers, playback),
+        {Field::Action, L"Playback equalizer and normalization…"},
         {Field::Choice, L"Microphone mode", L"", {L"Voice activation", L"Push-to-talk", L"Open microphone"}, audio.mode.load()},
         {Field::Slider, L"Microphone threshold (relative dB, 0 = off)", L"", {}, originalThreshold},
         {Field::Choice, L"Push-to-talk key", L"", {L"F6", L"F7", L"F8", L"F9", L"F10", L"F11", L"F12"}, pushKey - VK_F6},
@@ -1159,12 +1204,17 @@ void App::promptSettings() {
     };
     fields[Threshold].sliderScale.maximum = microphoneThresholdMax;
     fields[RelayAddress].visible = !directHosting;
+    fields[PlaybackEffectsField].onClick = [this](HWND parent) { promptPlayback(parent); };
     fields[Threshold].sliderSuffix = L" dB";
     fields[Threshold].onChange = [this](int value) { audio.threshold = value; };
     if (!form(window, L"Settings", fields)) {
         audio.threshold = originalThreshold;
+        audio.equalizerDb = savedEqualizer;
+        audio.normalizePlayback = savedNormalization;
         return;
     }
+    savedEqualizer = audio.equalizerDb.load();
+    savedNormalization = audio.normalizePlayback.load();
     audio.threshold = fields[Threshold].selected;
     auto selectDevice = [](const std::vector<AudioDevice>& devices, int index) {
         if (index > 0 && static_cast<std::size_t>(index) <= devices.size()) return devices[index - 1].id;

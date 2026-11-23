@@ -3,8 +3,8 @@
 101 ICON "TinySpeak.ico"
 
 1 VERSIONINFO
- FILEVERSION 0,0,0,12
- PRODUCTVERSION 0,0,0,12
+ FILEVERSION 0,0,0,13
+ PRODUCTVERSION 0,0,0,13
  FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
  FILEOS VOS_NT_WINDOWS32
  FILETYPE VFT_APP
@@ -14,9 +14,9 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "FileDescription", "TinySpeak"
-            VALUE "FileVersion", "Patch 12"
+            VALUE "FileVersion", "Patch 13"
             VALUE "ProductName", "TinySpeak"
-            VALUE "ProductVersion", "Patch 12"
+            VALUE "ProductVersion", "Patch 13"
         END
     END
     BLOCK "VarFileInfo"
