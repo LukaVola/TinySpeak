@@ -28,6 +28,7 @@ struct MenuEntry {
     bool enabled = true;
     bool separator = false;
     HFONT font = nullptr;
+    std::vector<MenuEntry> children;
 };
 
 unsigned showMenu(HWND owner, HWND anchor, std::vector<MenuEntry> entries, bool alignRight, const POINT* at = nullptr);

@@ -182,7 +182,7 @@ public:
     void close();
 
 private:
-    HWND servers{}, tree{}, transcript{}, composer{}, newServer{}, join{}, actions{}, muteButton{}, micSlider{}, outputSlider{}, exportChat{}, openChat{};
+    HWND servers{}, tree{}, transcript{}, composer{}, newServer{}, join{}, actions{}, muteButton{}, micSlider{}, outputSlider{};
     HFONT regular{}, bold{}, heading{};
     HBRUSH background{}, fieldBrush{};
     HIMAGELIST icons{};
@@ -804,7 +804,6 @@ void App::refreshChat() {
 void App::refreshActions() {
     if (!tree || inTray) return;
     const bool joined = !active().empty();
-    EnableWindow(exportChat, joined && !currentText.empty());
     EnableWindow(composer, joined && !currentText.empty());
     ShowWindow(transcript, joined && !currentText.empty() ? SW_SHOWNA : SW_HIDE);
     EnableWindow(newServer, directHosting ? !hostStarting && !joiningGuest : connected);
@@ -1371,9 +1370,11 @@ void App::popupActions() {
         {Settings, L"Settings…"},
         {0, L"", false, true},
         {Send, L"Send message  ·  Enter", inChat && GetWindowTextLengthW(composer) > 0},
-        {Export, L"Export chat as TXT…", inChat},
-        {OpenChatFile, L"Open chat TXT…"},
-        {Archive, L"Local chat logs…"},
+        {0, L"Chat logs", true, false, nullptr, {
+            {Export, L"Export chat as TXT…", inChat},
+            {OpenChatFile, L"Open chat TXT…"},
+            {Archive, L"Local chat logs…"},
+        }},
         {Mic, audio.muted ? L"Unmute microphone" : L"Mute microphone"},
         {ParticipantVolume, L"Participant volume…", selected.kind == "user" && !voicePeer(selected.id).empty()},
         {LeaveVoice, L"Leave voice room", !state.value("voice", "").empty()},
@@ -1852,8 +1853,6 @@ void App::createView() {
     newServer = button(L"New server", NewServer);
     join = button(L"Join", Join);
     actions = button(L"Menu", Actions);
-    exportChat = button(L"Export chat…", Export);
-    openChat = button(L"Open chat TXT…", OpenChatFile);
     tree = make(WC_TREEVIEWW, L"", WS_TABSTOP | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT |
         TVS_SHOWSELALWAYS | TVS_DISABLEDRAGDROP | TVS_NOHSCROLL, Tree);
     SetWindowTheme(tree, L"", L"");
@@ -1936,7 +1935,7 @@ void App::destroyView() {
     while (auto child = GetWindow(window, GW_CHILD)) DestroyWindow(child);
     nodes.clear();
     servers = tree = transcript = composer = newServer = join = actions = nullptr;
-    muteButton = micSlider = outputSlider = exportChat = openChat = nullptr;
+    muteButton = micSlider = outputSlider = nullptr;
     if (icons) ImageList_Destroy(std::exchange(icons, nullptr));
     for (auto font : {regular, bold, heading}) if (font) DeleteObject(font);
     regular = bold = heading = nullptr;
@@ -2010,8 +2009,6 @@ void App::arrange() {
     place(join, layout.join);
     place(actions, layout.menu);
     place(tree, layout.rooms);
-    place(exportChat, layout.exportChat);
-    place(openChat, layout.openChat);
     place(transcript, layout.transcript);
     RECT edit = layout.composer;
     InflateRect(&edit, -MulDiv(10, dpi, 96), -MulDiv(8, dpi, 96));

@@ -189,22 +189,74 @@ def choose_file(title, path):
     wait_for(lambda: not visible(dialog), "File dialog did not accept the selected path")
 
 
+class MenuBarInfo(ct.Structure):
+    _fields_ = [("size", wt.DWORD), ("rect", wt.RECT), ("menu", wt.HANDLE),
+                ("window", wt.HWND), ("flags", wt.DWORD)]
+
+
+def chat_menu(main, command):
+    bar_info = native(ui, "GetMenuBarInfo", wt.BOOL, wt.HWND, wt.LONG, wt.LONG, ct.POINTER(MenuBarInfo))
+    count = native(ui, "GetMenuItemCount", ct.c_int, wt.HANDLE)
+    item_id = native(ui, "GetMenuItemID", wt.UINT, wt.HANDLE, ct.c_int)
+    submenu = native(ui, "GetSubMenu", wt.HANDLE, wt.HANDLE, ct.c_int)
+    state = native(ui, "GetMenuState", wt.UINT, wt.HANDLE, wt.UINT, wt.UINT)
+    thread = window_thread(main, None)
+
+    def popup(expected=None):
+        for handle in children(None, "#32768"):
+            if not visible(handle) or window_thread(handle, None) != thread:
+                continue
+            info = MenuBarInfo()
+            info.size = ct.sizeof(info)
+            if bar_info(handle, -4, 0, ct.byref(info)) and info.menu and (not expected or expected == info.menu):
+                return handle, info.menu
+
+    def highlight(handle, menu, index):
+        def current():
+            return next((k for k in range(count(menu)) if state(menu, k, 0x0400) & 0x0080), -1)
+        if current() < 0:
+            post(handle, 0x0100, 0x28, 0)  # Down highlights the first command
+            wait_for(lambda: current() >= 0, "Popup keyboard focus")
+        for _ in range(count(menu)):
+            old = current()
+            if old == index:
+                return
+            post(handle, 0x0100, 0x28, 0)  # Down
+            wait_for(lambda: current() != old, "Popup selection did not move")
+        raise AssertionError("Popup command was not selectable")
+
+    assert not child(main, 118) and not child(main, 129), "Chat file buttons are still on the main window"
+    post(child(main, 103), 0x00f5, 0, 0)
+    outer, menu = wait_for(popup, "Main menu")
+    items = range(count(menu))
+    assert all(item_id(menu, i) not in (118, 129) for i in items)
+    for i in items:
+        logs = submenu(menu, i)
+        if logs and [item_id(logs, j) for j in range(count(logs))] == [118, 129, 106]:
+            break
+    else:
+        raise AssertionError("Chat logs submenu missing or in the wrong order")
+    highlight(outer, menu, i)
+    post(outer, 0x0100, 0x27, 0)  # Right opens the submenu
+    inner, _ = wait_for(lambda: popup(logs), "Chat logs submenu did not open")
+    highlight(inner, logs, [118, 129, 106].index(command))
+    post(inner, 0x0100, 0x0d, 0)  # Enter activates the actual command
+
+
 def check_files(main, root):
-    export, reopen = child(main, 118), child(main, 129)
-    assert export and reopen
     path = root / "conversation.txt"
-    post(export, 0x00f5, 0, 0)
+    chat_menu(main, 118)
     choose_file("Export chat as TXT", path)
     wait_for(path.exists, "Chat export")
     text = path.read_text(encoding="utf-8-sig")
     assert "Speaker: Test message 0" in text and "Speaker: Test message 74" in text
-    post(reopen, 0x00f5, 0, 0)
+    chat_menu(main, 129)
     choose_file("Open chat TXT", path)
     viewer = wait_for(lambda: find("#32770", "Saved chat"), "Saved chat viewer")
     assert "Speaker: Test message 74" in get_text(child(viewer, 501))
     press(viewer, 1)
     path.write_text("First ž\n" + "Čćć saved chat\r\n" * 24000 + "Last š", encoding="utf-8-sig")
-    post(reopen, 0x00f5, 0, 0)
+    chat_menu(main, 129)
     choose_file("Open chat TXT", path)
     viewer = wait_for(lambda: find("#32770", "Saved chat"), "Large chat viewer")
     assert get_text(child(viewer, 501)).startswith("First ž")

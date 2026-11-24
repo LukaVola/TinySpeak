@@ -2,7 +2,7 @@
 
 TinySpeak is a portable voice and text chat app for small groups on 64-bit Windows. Your PC hosts the server while TinySpeak is open. You and your friends only need a username and an invite.
 
-**[Download Patch 15 for Windows x64 (ZIP)](https://github.com/LukaVola/TinySpeak/releases/download/patch-15/TinySpeak-Windows-x64.zip)**
+**[Download Patch 16 for Windows x64 (ZIP)](https://github.com/LukaVola/TinySpeak/releases/download/patch-16/TinySpeak-Windows-x64.zip)**
 
 ## Start a conversation
 
@@ -35,7 +35,7 @@ The full Internet invite starts with **TS2-** and contains the information neede
 
 Right-click your voice room or open text channel to leave it. Owners can also rename rooms and channels, and remove someone from a voice room while keeping them on the server.
 
-A new installation saves owned servers, room layouts, bookmarks and local chat logs by default. Existing profiles keep their choices. Only messages received by that computer are archived. **Export chat…** saves the channel’s local log as a UTF-8 TXT file, or the current chat view when logging is off. **Open chat TXT…** directly below it opens a saved file, even when disconnected. Large logs have **Previous page** and **Next page** buttons. **Menu → Local chat logs** also lets you read, export or delete automatic archives.
+A new installation saves owned servers, room layouts, bookmarks and local chat logs by default. Existing profiles keep their choices. Only messages received by that computer are archived. Under **Menu → Chat logs**, **Export chat as TXT…** saves the channel’s local log as a UTF-8 TXT file, or the current chat view when logging is off. **Open chat TXT…** directly below it opens a saved file, even when disconnected. Large logs have **Previous page** and **Next page** buttons. **Local chat logs…** in the same submenu also lets you read, export or delete automatic archives.
 
 Closing the window keeps TinySpeak in the Windows system tray by default. Calls, hosting and local logging continue while the window controls are unloaded. Click the microphone tray icon or open the desktop shortcut to return. Right-click the icon and choose **Quit TinySpeak** for a full exit. You can also quit from **Menu** or disable close-to-tray in **Settings**.
 

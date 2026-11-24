@@ -137,17 +137,17 @@ LRESULT drawTrackbar(const NMCUSTOMDRAW& item, COLORREF surface) {
     return CDRF_SKIPDEFAULT;
 }
 
-unsigned showMenu(HWND owner, HWND anchor, std::vector<MenuEntry> entries, bool alignRight, const POINT* at) {
-    auto menu = CreatePopupMenu();
-    if (!menu) return 0;
-    auto brush = CreateSolidBrush(theme::field);
+namespace {
+HMENU makeMenu(std::vector<MenuEntry>& entries, HFONT font, HBRUSH brush) {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return nullptr;
     MENUINFO info{sizeof(info)};
     info.fMask = MIM_BACKGROUND;
     info.hbrBack = brush;
     SetMenuInfo(menu, &info);
     for (UINT index = 0; index < entries.size(); ++index) {
         auto& entry = entries[index];
-        entry.font = reinterpret_cast<HFONT>(SendMessageW(anchor, WM_GETFONT, 0, 0));
+        entry.font = font;
         MENUITEMINFOW row{sizeof(row)};
         row.fMask = MIIM_FTYPE | MIIM_ID | MIIM_DATA | MIIM_STATE | MIIM_STRING;
         row.fType = MFT_OWNERDRAW;
@@ -155,8 +155,27 @@ unsigned showMenu(HWND owner, HWND anchor, std::vector<MenuEntry> entries, bool 
         row.wID = entry.id;
         row.dwItemData = reinterpret_cast<ULONG_PTR>(&entry);
         row.dwTypeData = entry.label.data();
-        InsertMenuItemW(menu, index, TRUE, &row);
+        if (!entry.children.empty()) {
+            row.fMask |= MIIM_SUBMENU;
+            row.hSubMenu = makeMenu(entry.children, font, brush);
+            if (!row.hSubMenu) { DestroyMenu(menu); return nullptr; }
+        }
+        if (!InsertMenuItemW(menu, index, TRUE, &row)) {
+            if (row.hSubMenu) DestroyMenu(row.hSubMenu);
+            DestroyMenu(menu);
+            return nullptr;
+        }
     }
+    return menu;
+}
+}
+
+unsigned showMenu(HWND owner, HWND anchor, std::vector<MenuEntry> entries, bool alignRight, const POINT* at) {
+    auto brush = CreateSolidBrush(theme::field);
+    auto font = reinterpret_cast<HFONT>(SendMessageW(anchor, WM_GETFONT, 0, 0));
+    if (!font) font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    auto menu = makeMenu(entries, font, brush);
+    if (!menu) { DeleteObject(brush); return 0; }
     RECT rect{};
     GetWindowRect(anchor, &rect);
     if (at) rect = {at->x, at->y, at->x, at->y};
