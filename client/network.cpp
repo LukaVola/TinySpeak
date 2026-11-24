@@ -50,14 +50,14 @@ std::string randomCode(std::size_t count) {
     return value;
 }
 
-std::string inviteCode(const std::string& secret) {
+static std::string shortCode(const char* domain, const std::string& secret) {
     BCRYPT_ALG_HANDLE sha = nullptr;
     if (BCryptOpenAlgorithmProvider(&sha, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0) {
         throw std::runtime_error("Windows SHA-256 provider failed.");
     }
     std::string value;
     for (int n = 0; value.size() < 16; ++n) {
-        auto input = "Kanal invite v1:" + secret + ":" + std::to_string(n);
+        auto input = domain + secret + ":" + std::to_string(n);
         std::array<unsigned char, 32> digest{};
         if (BCryptHash(sha, nullptr, 0, reinterpret_cast<PUCHAR>(input.data()), static_cast<ULONG>(input.size()),
             digest.data(), static_cast<ULONG>(digest.size())) != 0) {
@@ -69,6 +69,9 @@ std::string inviteCode(const std::string& secret) {
     BCryptCloseAlgorithmProvider(sha, 0);
     return value;
 }
+
+std::string inviteCode(const std::string& secret) { return shortCode("Kanal invite v1:", secret); }
+std::string profileCode(const std::string& secret) { return shortCode("TinySpeak profile code v1:", secret); }
 
 namespace {
 struct HttpHandle {

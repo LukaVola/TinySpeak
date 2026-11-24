@@ -114,6 +114,7 @@ struct Connection final : livekit::RoomDelegate {
         room.disconnect();
         if (wake) CloseHandle(wake);
         owner.level = 0;
+        owner.lastSpeechAt = 0;
         owner.talking = false;
     }
 
@@ -209,6 +210,7 @@ struct Connection final : livekit::RoomDelegate {
                     const bool microphoneAllowed = owner.permitted && !owner.muted && (owner.mode != 1 || owner.push);
                     const auto frame = gateMicrophoneFrame(samples, owner.inputGain.load(), minimumPower, microphoneAllowed);
                     owner.level = frame.peakPercent;
+                    if (frame.speech) owner.lastSpeechAt = GetTickCount64();
                     owner.talking = frame.transmitting;
                     try { source->captureFrame(mic, 20); } catch (const std::exception&) {}
                 }

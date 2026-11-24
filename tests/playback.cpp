@@ -8,6 +8,7 @@
 #define MINIAUDIO_IMPLEMENTATION
 #include "playback_effects.h"
 #include "slider_scale.h"
+#include "voice_gate.h"
 
 #include <cassert>
 #include <cstdio>
@@ -39,6 +40,12 @@ double responseDb(EqualizerGains gains, double frequency) {
 }
 
 int main() {
+    std::array<std::int16_t, 480> input{};
+    auto silent = gateMicrophoneFrame(input, 100, 0, true);
+    assert(silent.transmitting && !silent.speech);
+    input.fill(2000);
+    assert(gateMicrophoneFrame(input, 100, microphoneGatePower(30, input.size()), true).speech);
+    assert(!gateMicrophoneFrame(input, 100, 0, false).speech);
     const SliderScale eqScale{equalizerLimitDb, false, -equalizerLimitDb};
     for (int db = -equalizerLimitDb; db <= equalizerLimitDb; ++db) assert(eqScale.value(eqScale.position(db)) == db);
     for (bool stepped : {false, true}) {

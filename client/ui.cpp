@@ -308,6 +308,69 @@ struct LogPages {
     }
 };
 
+std::wstring keyLabel(int key) {
+    switch (key) {
+    case VK_LBUTTON: return L"Left mouse button";
+    case VK_RBUTTON: return L"Right mouse button";
+    case VK_MBUTTON: return L"Middle mouse button";
+    case VK_XBUTTON1: return L"Mouse 4";
+    case VK_XBUTTON2: return L"Mouse 5";
+    }
+    UINT scan = MapVirtualKeyW(key, MAPVK_VK_TO_VSC_EX);
+    LONG bits = (scan & 0xff) << 16;
+    if (scan & 0xff00) bits |= 1L << 24;
+    wchar_t label[80]{};
+    if (GetKeyNameTextW(bits, label, ARRAYSIZE(label))) return label;
+    return L"Key " + std::to_wstring(key);
+}
+
+void armKey(Field& field) {
+    SetFocus(field.input);
+    field.capturing = true;
+    putText(field.input, L"Press a key or mouse button…");
+}
+
+LRESULT CALLBACK keyCapture(HWND window, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) {
+    auto& field = *reinterpret_cast<Field*>(data);
+    if (msg == WM_KILLFOCUS) {
+        field.capturing = false;
+        field.capturedKey = 0;
+        putText(window, keyLabel(field.selected));
+    }
+    if (msg == WM_GETDLGCODE && (field.capturing || field.capturedKey || wp == VK_RETURN))
+        return DLGC_WANTALLKEYS;
+    if (msg == WM_CHAR || msg == WM_SYSCHAR) return 0;
+    if (msg == WM_KEYUP || msg == WM_SYSKEYUP) {
+        if (field.capturedKey == static_cast<int>(wp)) { field.capturedKey = 0; return 0; }
+    }
+    if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
+        if (field.capturedKey == static_cast<int>(wp)) return 0;
+        if (!field.capturing && wp == VK_RETURN) {
+            if (!(lp & (1L << 30))) { armKey(field); field.capturedKey = VK_RETURN; }
+            return 0;
+        }
+        if (field.capturing && wp > 0 && wp < 255) {
+            int key = static_cast<int>(wp);
+            if (key == VK_SHIFT) key = MapVirtualKeyW((lp >> 16) & 0xff, MAPVK_VSC_TO_VK_EX);
+            if (key == VK_CONTROL) key = (lp & (1L << 24)) ? VK_RCONTROL : VK_LCONTROL;
+            if (key == VK_MENU) key = (lp & (1L << 24)) ? VK_RMENU : VK_LMENU;
+            field.selected = key;
+            field.capturedKey = static_cast<int>(wp);
+            field.capturing = false;
+            putText(window, keyLabel(key));
+            return 0;
+        }
+    }
+    if (field.capturing && (msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN || msg == WM_XBUTTONDOWN)) {
+        field.selected = msg == WM_LBUTTONDOWN ? VK_LBUTTON : msg == WM_RBUTTONDOWN ? VK_RBUTTON :
+            msg == WM_MBUTTONDOWN ? VK_MBUTTON : HIWORD(wp) == XBUTTON1 ? VK_XBUTTON1 : VK_XBUTTON2;
+        field.capturing = false;
+        putText(window, keyLabel(field.selected));
+        return TRUE;
+    }
+    return DefSubclassProc(window, msg, wp, lp);
+}
+
 struct Form {
     const wchar_t* title;
     std::vector<Field>* fields;
@@ -395,6 +458,7 @@ struct Form {
         if (self && self->fields && message == WM_COMMAND && HIWORD(wParam) == BN_CLICKED && lParam) {
             for (auto& field : *self->fields) {
                 if (field.input != reinterpret_cast<HWND>(lParam)) continue;
+                if (field.type == Field::Key) { armKey(field); return TRUE; }
                 if (field.type == Field::Action && field.onClick) {
                     field.onClick(window);
                     return TRUE;
@@ -455,9 +519,13 @@ struct Form {
                     row += y + 3;
                 }
                 DWORD style = WS_TABSTOP;
-                if (f.type == Field::Text) {
+                if (f.type == Field::Text || f.type == Field::ReadOnly) {
+                    if (f.type == Field::ReadOnly) style |= ES_READONLY;
                     f.input = control(window, L"EDIT", f.text.c_str(), style | ES_AUTOHSCROLL, 100 + row, WS_EX_CLIENTEDGE);
                     SendMessageW(f.input, EM_LIMITTEXT, 512, 0);
+                } else if (f.type == Field::Key) {
+                    f.input = control(window, L"BUTTON", keyLabel(f.selected).c_str(), style | BS_OWNERDRAW, 100 + row);
+                    SetWindowSubclass(f.input, keyCapture, 1, reinterpret_cast<DWORD_PTR>(&f));
                 } else if (f.type == Field::Choice) {
                     f.input = control(window, L"COMBOBOX", L"", style | CBS_DROPDOWNLIST |
                         CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL, 100 + row);

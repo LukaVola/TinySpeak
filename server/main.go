@@ -36,17 +36,20 @@ const (
 )
 
 type room struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Kind string `json:"kind"`
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Kind  string `json:"kind"`
+	Limit int    `json:"limit,omitempty"`
 }
 
 type user struct {
-	ID        string `json:"id"`
-	ProfileID string `json:"profile_id,omitempty"`
-	Name      string `json:"name"`
-	Color     int    `json:"color"`
-	Voice     string `json:"voice,omitempty"`
+	micState
+	ProfileCode string `json:"profile_code,omitempty"`
+	ID          string `json:"id"`
+	ProfileID   string `json:"profile_id,omitempty"`
+	Name        string `json:"name"`
+	Color       int    `json:"color"`
+	Voice       string `json:"voice,omitempty"`
 }
 
 type advert struct {
@@ -66,63 +69,75 @@ type event struct {
 
 type client struct {
 	user
-	key, active, voiceID string
-	invited              string
-	seen, lastMessage    time.Time
-	pending              []event
-	wake                 chan struct{}
-	dirty, closed        bool
-	version              uint64
+	key, active, voiceID, textID string
+	indicators                   bool
+	pendingMic                   map[string]micState
+	invited                      string
+	seen, lastMessage            time.Time
+	pending                      []event
+	wake                         chan struct{}
+	dirty, closed                bool
+	version                      uint64
 }
 
 type server struct {
 	advert
-	owner, secret   string
-	rooms           []room
-	members         map[string]*client
-	waking, archive bool
+	owner, secret, ownerCode string
+	rooms                    []room
+	members                  map[string]*client
+	known                    map[string]knownProfile
+	waking, archive          bool
 }
 
 type request struct {
-	Op      string   `json:"op"`
-	Profile string   `json:"profile"`
-	Code    string   `json:"code"`
-	Codes   []string `json:"codes"`
-	Secret  string   `json:"secret"`
-	Name    string   `json:"name"`
-	Room    string   `json:"room"`
-	Kind    string   `json:"kind"`
-	Text    string   `json:"text"`
-	Target  string   `json:"target"`
-	Color   int      `json:"color"`
-	Archive bool     `json:"archive"`
-	Rooms   []room   `json:"rooms"`
+	Op         string   `json:"op"`
+	Profile    string   `json:"profile"`
+	Code       string   `json:"code"`
+	Codes      []string `json:"codes"`
+	Secret     string   `json:"secret"`
+	Name       string   `json:"name"`
+	Room       string   `json:"room"`
+	Kind       string   `json:"kind"`
+	Text       string   `json:"text"`
+	Target     string   `json:"target"`
+	Color      int      `json:"color"`
+	Archive    bool     `json:"archive"`
+	Limit      int      `json:"limit"`
+	Muted      bool     `json:"muted"`
+	Speaking   bool     `json:"speaking"`
+	Indicators bool     `json:"voice_indicators"`
+	Rooms      []room   `json:"rooms"`
 }
 
 type state struct {
 	advert
-	Owner   string `json:"owner"`
-	Rooms   []room `json:"rooms"`
-	Users   []user `json:"users"`
-	Voice   string `json:"voice"`
-	Archive bool   `json:"archive"`
+	Owner      string         `json:"owner"`
+	Rooms      []room         `json:"rooms"`
+	Users      []user         `json:"users"`
+	Offline    []knownProfile `json:"offline,omitempty"`
+	Text       string         `json:"text_room"`
+	Indicators bool           `json:"voice_indicators"`
+	Voice      string         `json:"voice"`
+	Archive    bool           `json:"archive"`
 }
 
 type response struct {
-	Error        string   `json:"error,omitempty"`
-	Key          string   `json:"key,omitempty"`
-	User         *user    `json:"user,omitempty"`
-	State        *state   `json:"state,omitempty"`
-	Events       []event  `json:"events,omitempty"`
-	Catalog      []advert `json:"catalog,omitempty"`
-	URL          string   `json:"url,omitempty"`
-	Token        string   `json:"token,omitempty"`
-	TurnUser     string   `json:"turnUser,omitempty"`
-	TurnPassword string   `json:"turnPassword,omitempty"`
-	Room         *room    `json:"room,omitempty"`
-	Retry        bool     `json:"retry,omitempty"`
-	Reset        bool     `json:"reset,omitempty"`
-	Version      uint64   `json:"version,omitempty"`
+	Error        string              `json:"error,omitempty"`
+	Key          string              `json:"key,omitempty"`
+	User         *user               `json:"user,omitempty"`
+	State        *state              `json:"state,omitempty"`
+	Events       []event             `json:"events,omitempty"`
+	Catalog      []advert            `json:"catalog,omitempty"`
+	URL          string              `json:"url,omitempty"`
+	Token        string              `json:"token,omitempty"`
+	TurnUser     string              `json:"turnUser,omitempty"`
+	TurnPassword string              `json:"turnPassword,omitempty"`
+	Room         *room               `json:"room,omitempty"`
+	Retry        bool                `json:"retry,omitempty"`
+	Reset        bool                `json:"reset,omitempty"`
+	Version      uint64              `json:"version,omitempty"`
+	MicCode      string              `json:"mic_code,omitempty"`
+	Mic          map[string]micState `json:"mic,omitempty"`
 }
 
 type voiceConfig struct {
@@ -131,12 +146,13 @@ type voiceConfig struct {
 }
 
 type service struct {
-	mu      sync.Mutex
-	clients map[string]*client
-	servers map[string]*server
-	voice   voiceConfig
-	http    *http.Client
-	hosted  bool
+	mu        sync.Mutex
+	clients   map[string]*client
+	servers   map[string]*server
+	voice     voiceConfig
+	http      *http.Client
+	hosted    bool
+	rosterDir string
 }
 
 func randomString(length int) string {
@@ -151,10 +167,19 @@ func randomString(length int) string {
 	return string(result)
 }
 
-func inviteCode(secret string) string {
+func inviteCode(secret string) string { return shortCode("Kanal invite v1:", secret) }
+
+func profileCode(secret string) string {
+	if !validID(secret, 40) {
+		return ""
+	}
+	return shortCode("TinySpeak profile code v1:", secret)
+}
+
+func shortCode(domain, secret string) string {
 	code := make([]byte, 0, 16)
 	for counter := 0; len(code) < 16; counter++ {
-		digest := sha256.Sum256([]byte("Kanal invite v1:" + secret + ":" + strconv.Itoa(counter)))
+		digest := sha256.Sum256([]byte(domain + secret + ":" + strconv.Itoa(counter)))
 		for _, b := range digest {
 			if b < 248 {
 				code = append(code, alphabet[b%62])
@@ -217,7 +242,7 @@ func (s *service) snapshot(c *client) *state {
 	if srv == nil {
 		return nil
 	}
-	result := &state{advert: srv.advert, Owner: srv.owner, Voice: c.Voice, Archive: srv.archive,
+	result := &state{advert: srv.advert, Owner: srv.owner, Voice: c.Voice, Text: c.textID, Indicators: true, Offline: srv.offline(), Archive: srv.archive,
 		Rooms: append([]room{}, srv.rooms...), Users: make([]user, 0, len(srv.members))}
 	for _, member := range srv.members {
 		result.Users = append(result.Users, member.user)
@@ -234,6 +259,8 @@ func (s *service) stopVoice(c *client) {
 		go s.removeVoice(c.active+"-"+c.Voice, c.voiceID)
 	}
 	c.Voice, c.voiceID = "", ""
+	c.Speaking = false
+	c.Seq++
 }
 
 func (s *service) leave(c *client) {
@@ -245,7 +272,7 @@ func (s *service) leave(c *client) {
 		}
 		srv.changed()
 	}
-	c.active = ""
+	c.active, c.textID, c.pendingMic = "", "", nil
 	c.version++
 	c.dirty = true
 	c.notify()
@@ -255,7 +282,7 @@ func (s *service) removeServer(code string) {
 	srv := s.servers[code]
 	for _, member := range srv.members {
 		s.stopVoice(member)
-		member.active = ""
+		member.active, member.textID, member.pendingMic = "", "", nil
 		member.version++
 		member.dirty = true
 		member.send(event{Type: "closed", Code: code})
@@ -310,7 +337,7 @@ func validRooms(rooms []room) bool {
 	ids := map[string]bool{}
 	for _, r := range rooms {
 		name, ok := cleanLabel(r.Name, 1, 40)
-		if !ok || name != r.Name || !validID(r.ID, 12) || ids[r.ID] || (r.Kind != "text" && r.Kind != "voice") {
+		if !ok || name != r.Name || !validID(r.ID, 12) || ids[r.ID] || r.Limit < 0 || r.Limit > maxVoice || (r.Kind != "text" && r.Kind != "voice") {
 			return false
 		}
 		ids[r.ID] = true
@@ -343,14 +370,18 @@ func (s *service) command(c *client, q request) response {
 			if len(s.servers) >= 8192 {
 				return fail("The relay is at capacity.")
 			}
-			srv = &server{advert: advert{q.Code, name}, owner: c.ID, secret: q.Secret, members: map[string]*client{}}
+			srv = &server{advert: advert{q.Code, name}, owner: c.ID, ownerCode: c.ProfileCode, secret: q.Secret, members: map[string]*client{}}
 			s.servers[q.Code] = srv
+			if q.Archive {
+				s.loadRoster(srv)
+			}
 		}
 		if srv.owner != c.ID || srv.secret != q.Secret {
 			return fail("The invite code is already in use.")
 		}
 		if srv.archive != q.Archive {
 			srv.archive = q.Archive
+			s.saveRoster(srv)
 			srv.changed()
 		}
 		return response{}
@@ -364,7 +395,10 @@ func (s *service) command(c *client, q request) response {
 		if nameTaken(srv, c.Name, c.ID) {
 			return fail("That username is already in use on this server.")
 		}
-		if len(srv.members) >= maxUsers {
+		if c.ProfileCode != "" && srv.hasOnline(c.ProfileCode) {
+			return fail("This profile is already online in this server.")
+		}
+		if !srv.hasSpace(c) {
 			return fail("The server is full (256 users).")
 		}
 		if srv.rooms == nil {
@@ -382,6 +416,8 @@ func (s *service) command(c *client, q request) response {
 		s.leave(c)
 		c.active = q.Code
 		srv.members[c.ID] = c
+		c.textID = srv.firstText()
+		s.rememberMember(srv, c)
 		srv.changed()
 		return response{State: s.snapshot(c)}
 	case "hydrate":
@@ -399,6 +435,8 @@ func (s *service) command(c *client, q request) response {
 		if srv == nil || srv.owner != c.ID {
 			return fail("Only the owner can delete the server.")
 		}
+		srv.archive = false
+		s.saveRoster(srv)
 		s.removeServer(q.Code)
 		return response{State: s.snapshot(c), Reset: c.active == ""}
 	case "profile":
@@ -411,6 +449,7 @@ func (s *service) command(c *client, q request) response {
 		}
 		c.Name, c.Color = name, q.Color
 		if active != nil {
+			s.rememberMember(active, c)
 			active.changed()
 		}
 		return response{User: &c.user, State: s.snapshot(c)}
@@ -424,6 +463,52 @@ func (s *service) command(c *client, q request) response {
 	}
 	index := slices.IndexFunc(active.rooms, func(r room) bool { return r.ID == q.Room })
 	switch q.Op {
+	case "sync":
+		return response{State: s.snapshot(c)}
+	case "mic_status":
+		if !c.indicators || q.Target != "" {
+			return fail("Invalid microphone update.")
+		}
+		c.setMic(active, q.Muted, q.Speaking && !q.Muted && c.Voice != "" && q.Room == c.Voice)
+		return response{}
+	case "text_enter":
+		if index < 0 || active.rooms[index].Kind != "text" {
+			return fail("Select a text room.")
+		}
+		if !active.hasRoom(active.rooms[index], c) {
+			return fail("The text room is full.")
+		}
+		c.textID = q.Room
+		c.version++
+		return response{State: s.snapshot(c)}
+	case "text_leave":
+		c.textID = ""
+		c.version++
+		return response{State: s.snapshot(c)}
+	case "room_limit":
+		if active.owner != c.ID || index < 0 {
+			return fail("Only the owner can set a room limit.")
+		}
+		if q.Limit < 1 || q.Limit > maxVoice {
+			return fail("Choose a room limit from 1 to 16.")
+		}
+		if active.occupancy(active.rooms[index], nil) > q.Limit {
+			return fail("More people are in this room than the selected limit. Choose a higher limit or wait for someone to leave.")
+		}
+		active.rooms[index].Limit = q.Limit
+		active.changed()
+		return response{State: s.snapshot(c)}
+	case "forget_member":
+		if active.owner != c.ID || active.hasOnline(q.Target) {
+			return fail("Only the owner can remove an offline member.")
+		}
+		if _, ok := active.known[q.Target]; !ok {
+			return fail("This profile is no longer offline.")
+		}
+		delete(active.known, q.Target)
+		s.saveRoster(active)
+		active.changed()
+		return response{State: s.snapshot(c)}
 	case "room_add":
 		name, ok := cleanLabel(q.Name, 1, 40)
 		if active.owner != c.ID || !ok || (q.Kind != "text" && q.Kind != "voice") {
@@ -438,7 +523,7 @@ func (s *service) command(c *client, q request) response {
 		if count == maxRooms {
 			return fail("The limit of 32 rooms of this type has been reached.")
 		}
-		r := room{randomString(12), name, q.Kind}
+		r := room{ID: randomString(12), Name: name, Kind: q.Kind, Limit: maxVoice}
 		active.rooms = append(active.rooms, r)
 		active.changed()
 		return response{State: s.snapshot(c), Room: &r}
@@ -452,6 +537,11 @@ func (s *service) command(c *client, q request) response {
 			}
 		}
 		active.rooms = slices.Delete(active.rooms, index, index+1)
+		for _, member := range active.members {
+			if member.textID == q.Room {
+				member.textID = active.firstText()
+			}
+		}
 		active.changed()
 		return response{State: s.snapshot(c)}
 	case "room_rename":
@@ -466,6 +556,9 @@ func (s *service) command(c *client, q request) response {
 		if index < 0 || active.rooms[index].Kind != "text" {
 			return fail("Select a text room.")
 		}
+		if c.textID != q.Room && (active.rooms[index].Limit > 0 || c.indicators) {
+			return fail("Join the text room first.")
+		}
 		body := strings.TrimSpace(q.Text)
 		if utf8.RuneCountInString(body) < 1 || utf8.RuneCountInString(body) > 2000 ||
 			strings.IndexFunc(body, unicode.IsControl) >= 0 {
@@ -478,7 +571,13 @@ func (s *service) command(c *client, q request) response {
 		e := event{Type: "chat", Code: c.active, Room: q.Room, Name: active.rooms[index].Name,
 			Sender: c.Name, Text: body, At: time.Now().UTC().Format(time.RFC3339)}
 		for _, member := range active.members {
-			member.send(e)
+			if active.rooms[index].Limit == 0 || member.textID == q.Room {
+				member.send(e)
+			} else if member.ID == active.owner && active.archive {
+				archive := e
+				archive.Type = "archive_chat"
+				member.send(archive)
+			}
 		}
 		if active.archive && active.members[active.owner] == nil {
 			for _, owner := range s.clients {
@@ -496,14 +595,8 @@ func (s *service) command(c *client, q request) response {
 		if s.voice.URL == "" {
 			return fail("The voice service has not been configured.")
 		}
-		count := 0
-		for _, member := range active.members {
-			if member.ID != c.ID && member.Voice == q.Room {
-				count++
-			}
-		}
-		if count >= maxVoice {
-			return fail("The voice room is full (16 users).")
+		if !active.hasRoom(active.rooms[index], c) {
+			return fail("The voice room is full.")
 		}
 		if c.Voice != q.Room {
 			s.stopVoice(c)
@@ -535,6 +628,8 @@ func (s *service) command(c *client, q request) response {
 		if active.owner != c.ID || target == nil || target.ID == c.ID {
 			return fail("Only the owner can remove another user.")
 		}
+		delete(active.known, target.ProfileCode)
+		s.saveRoster(active)
 		s.leave(target)
 		target.send(event{Type: "kicked", Code: q.Code})
 		return response{}
@@ -576,13 +671,16 @@ func (s *service) poll(ctx context.Context, c *client) response {
 			s.mu.Unlock()
 			return fail("Your session expired.")
 		}
-		if c.dirty || len(c.pending) != 0 {
+		if c.dirty || len(c.pending) != 0 || len(c.pendingMic) != 0 {
 			result := response{Events: c.pending, Version: c.version}
 			c.pending = nil
 			if c.dirty {
 				result.State, result.Reset = s.snapshot(c), c.active == ""
 				c.dirty = false
+			} else if len(c.pendingMic) != 0 {
+				result.MicCode, result.Mic = c.active, c.pendingMic
 			}
+			c.pendingMic = nil
 			s.mu.Unlock()
 			return result
 		}
@@ -631,11 +729,12 @@ func (s *service) handle(w http.ResponseWriter, r *http.Request) {
 			write(http.StatusOK, fail("Usernames must be 4–32 characters."))
 			return
 		}
-		c := &client{user: user{ID: randomString(24), ProfileID: profileID(q.Profile), Name: name, Color: q.Color}, key: randomString(40),
-			seen: time.Now(), wake: make(chan struct{}, 1), invited: invited}
+		c := &client{user: user{ID: randomString(24), ProfileID: profileID(q.Profile), ProfileCode: profileCode(q.Profile), micState: micState{Muted: q.Muted}, Name: name, Color: q.Color}, key: randomString(40),
+			seen: time.Now(), wake: make(chan struct{}, 1), invited: invited, indicators: q.Indicators}
 		s.clients[c.key] = c
+		u := c.user
 		s.mu.Unlock()
-		write(http.StatusOK, response{Key: c.key, User: &c.user})
+		write(http.StatusOK, response{Key: c.key, User: &u})
 		return
 	}
 	c := s.clients[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]

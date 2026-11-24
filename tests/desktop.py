@@ -26,8 +26,12 @@ def wait_for(check, description):
 
 class Relay(BaseHTTPRequestHandler):
     joined = []
+    room_actions = []
+    created = {}
+    layouts = {}
     user = {"id": "listener", "name": "Listener", "color": 8}
-    room = {"id": "ChatRoom0001", "kind": "text", "name": "general"}
+    room = {"id": "ChatRoom0001", "kind": "text", "name": "General", "limit": 16}
+    voice = {"id": "VoiceRoom001", "kind": "voice", "name": "Lounge", "limit": 16}
 
     def log_message(self, *args):
         pass
@@ -38,17 +42,32 @@ class Relay(BaseHTTPRequestHandler):
         response = {}
         if op == "register":
             response = {"key": "test-session", "user": self.user}
+        elif op == "advertise":
+            self.created[command["code"]] = command["name"]
+        elif op == "hydrate":
+            self.layouts[command["code"]] = command["rooms"]
+        elif op == "join" and command["code"] in self.created:
+            code = command["code"]
+            if code not in self.layouts:
+                response = {"retry": True, "events": [{"type": "load", "code": code}]}
+            else:
+                rooms = self.layouts[code]
+                response = {"version": 100, "state": {"code": code, "name": self.created[code], "owner": self.user["id"],
+                            "users": [self.user], "rooms": rooms, "text_room": rooms[0]["id"]}}
         elif op == "join":
             code = command["code"]
             self.joined.append(code)
             response = {
                 "state": {"code": code, "name": "Test server", "owner": self.user["id"],
-                          "users": [self.user], "rooms": [self.room]},
-                "events": [{"type": "chat", "code": code, "room": self.room["id"], "name": "general",
+                          "users": [self.user], "rooms": [self.room, self.voice], "text_room": self.room["id"],
+                          "offline": [{"profile_code": "PublicCode123456", "name": "Away", "color": 2}]},
+                "events": [{"type": "chat", "code": code, "room": self.room["id"], "name": "General",
                             "at": "2026-01-01T10:00:00Z", "sender": "Speaker", "text": f"Test message {i}"}
                            for i in range(75)],
                 "version": len(self.joined),
             }
+        elif op in ("room_limit", "room_add"):
+            self.room_actions.append(command)
         elif op == "poll":
             time.sleep(0.1)
         data = json.dumps(response).encode()
@@ -136,6 +155,14 @@ def check_settings(main, change):
             bitrate = combo
             break
     assert bitrate
+    assert send(bitrate, 0x0158, -1, ct.addressof(ct.create_unicode_buffer("32 kbps"))) >= 0
+    key = find_child(dialog, None, "Button", "F8" if change else "V")
+    assert key, "The selected push-to-talk key was not restored"
+    if change:
+        send(key, 0x00f5, 0, 0)
+        send(key, 0x0100, ord("V"), 0x002f0001)
+        send(key, 0x0101, ord("V"), 0xc02f0001)
+        assert get_text(key) == "V"
     assert send(bitrate, 0x0158, -1, ct.addressof(ct.create_unicode_buffer("80 kbps"))) >= 0
     if change:
         send(bitrate, 0x014e, idx, 0)  # CB_SETCURSEL
@@ -194,7 +221,7 @@ class MenuBarInfo(ct.Structure):
                 ("window", wt.HWND), ("flags", wt.DWORD)]
 
 
-def chat_menu(main, command):
+def choose_menu(main, command, room=None):
     bar_info = native(ui, "GetMenuBarInfo", wt.BOOL, wt.HWND, wt.LONG, wt.LONG, ct.POINTER(MenuBarInfo))
     count = native(ui, "GetMenuItemCount", ct.c_int, wt.HANDLE)
     item_id = native(ui, "GetMenuItemID", wt.UINT, wt.HANDLE, ct.c_int)
@@ -225,6 +252,17 @@ def chat_menu(main, command):
             wait_for(lambda: current() != old, "Popup selection did not move")
         raise AssertionError("Popup command was not selectable")
 
+    if room:
+        tree = child(main, 107)
+        send(tree, 0x110b, 9, room)  # Select this room, then open its native context menu.
+        post(main, 0x007b, tree, -1)
+        handle, menu = wait_for(popup, "Room context menu")
+        commands = [item_id(menu, i) for i in range(count(menu))]
+        assert command in commands and 132 in commands
+        highlight(handle, menu, commands.index(command))
+        post(handle, 0x0100, 0x0d, 0)
+        return
+
     assert not child(main, 118) and not child(main, 129), "Chat file buttons are still on the main window"
     post(child(main, 103), 0x00f5, 0, 0)
     outer, menu = wait_for(popup, "Main menu")
@@ -245,18 +283,18 @@ def chat_menu(main, command):
 
 def check_files(main, root):
     path = root / "conversation.txt"
-    chat_menu(main, 118)
+    choose_menu(main, 118)
     choose_file("Export chat as TXT", path)
     wait_for(path.exists, "Chat export")
     text = path.read_text(encoding="utf-8-sig")
     assert "Speaker: Test message 0" in text and "Speaker: Test message 74" in text
-    chat_menu(main, 129)
+    choose_menu(main, 129)
     choose_file("Open chat TXT", path)
     viewer = wait_for(lambda: find("#32770", "Saved chat"), "Saved chat viewer")
     assert "Speaker: Test message 74" in get_text(child(viewer, 501))
     press(viewer, 1)
     path.write_text("First ž\n" + "Čćć saved chat\r\n" * 24000 + "Last š", encoding="utf-8-sig")
-    chat_menu(main, 129)
+    choose_menu(main, 129)
     choose_file("Open chat TXT", path)
     viewer = wait_for(lambda: find("#32770", "Saved chat"), "Large chat viewer")
     assert get_text(child(viewer, 501)).startswith("First ž")
@@ -276,6 +314,45 @@ def paste_into_join(main, value):
     assert send(field, 0x000C, 0, ct.addressof(data))  # WM_SETTEXT
     post(dialog, 0x111, 1, 0)
     wait_for(lambda: not find("#32770", "Join a server"), "Join dialog did not close")
+
+
+def profile_code(main):
+    post(main, 0x111, 104, 0)
+    dialog = wait_for(lambda: find("#32770", "Username and color"), "Profile dialog")
+    code = next(get_text(w) for w in children(dialog, "Edit") if style(w, -16) & 0x0800)
+    assert len(code) == 16 and code.isascii() and code.isalnum()
+    press(dialog, 2)
+    return code
+
+
+def check_rooms(main):
+    tree = child(main, 107)
+    def next_item(flag, item=0):
+        return send(tree, 0x110a, flag, item)
+    texts = next_item(0)
+    voices = next_item(1, texts)
+    online = next_item(1, voices)
+    offline = next_item(1, online)
+    assert offline and next_item(4, offline) and not send(tree, 0x1127, offline, 32)
+    send(tree, 0x1102, 2, offline)  # TVM_EXPAND
+    assert send(tree, 0x1127, offline, 32)
+    for group, kind, current in [(texts, "text", Relay.room), (voices, "voice", Relay.voice)]:
+        room = next_item(4, group)
+        choose_menu(main, 114 if kind == "text" else 115, room)
+        dialog = wait_for(lambda: find("#32770", f"New {kind} room"), "New room dialog")
+        set_text(find_child(dialog, None, "Edit", None), "Another room")
+        press(dialog, 1)
+        choose_menu(main, 132, room)
+        dialog = wait_for(lambda: find("#32770", "Room limit"), "Capacity dialog")
+        choices = find_child(dialog, None, "ComboBox", None)
+        assert choices and send(choices, 0x0146, 0, 0) == 16 and send(choices, 0x0147, 0, 0) == 15
+        send(choices, 0x014e, 2, 0)
+        press(dialog, 1)
+        wait_for(lambda: any(r["op"] == "room_add" and r["kind"] == kind and r["name"] == "Another room"
+                             for r in Relay.room_actions), "Create room command")
+        wait_for(lambda: any(r["op"] == "room_limit" and r["room"] == current["id"] and r["limit"] == 3
+                             for r in Relay.room_actions), "Room limit command")
+    send(tree, 0x110b, 9, next_item(4, texts))
 
 
 def inspect_history(main):
@@ -322,6 +399,7 @@ def test(client):
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path + r"\shell\open\command") as key:
             assert winreg.QueryValueEx(key, None)[0] == f'"{client}" --join-uri "%1"'
         main = window()
+        initial_code = profile_code(main)
         check_settings(main, True)
         set_slider(main, child(main, 122), 28)  # 120%
         set_slider(main, child(main, 123), 20)  # 80%
@@ -329,12 +407,14 @@ def test(client):
         settings = json.loads(profile.read_text(encoding="utf-8"))
         assert (settings["mic_gain"], settings["output_gain"], settings["mic_muted"]) == (120, 80, False)
         assert settings["normalization_percent"] == 75 and settings["voice_bitrate_kbps"] == 128
+        assert settings["ptt"] == ord("V") and not settings["offline_expanded"]
         assert send(main, 0x0011, 0, 0) == 1  # WM_QUERYENDSESSION, followed by confirmed Windows shutdown
         post(main, 0x0016, 1, 0)
         assert first.wait(15) == 0
         assert open_url(None, "open", prefix + codes[0], None, None, 1) > 32
         wait_for(lambda: Relay.joined == codes[:1], "Cold link did not join its server")
         main = wait_for(window, "Cold link did not open TinySpeak")
+        assert profile_code(main) == initial_code
         check_settings(main, False)
         pid = wt.DWORD()
         window_thread(main, ct.byref(pid))
@@ -347,6 +427,7 @@ def test(client):
         paste_into_join(main, codes[2])
         wait_for(lambda: len(Relay.joined) >= 3, "Manual invite code did not join")
         inspect_history(main)
+        check_rooms(main)
         with tempfile.TemporaryDirectory() as folder:
             check_files(main, Path(folder))
         if find("Shell_TrayWnd", None):
@@ -357,6 +438,13 @@ def test(client):
             assert get_text(child(main, 109)) == "x" and "Test message 74" in get_text(child(main, 108))
         assert Relay.joined == codes, "The Join box also accepted the URL"
         assert subprocess.run([client, "--join-uri", prefix + codes[0] + "?unexpected"], timeout=10).returncode == 2
+        post(main, 0x111, 101, 0)
+        dialog = wait_for(lambda: find("#32770", "New server"), "New server dialog")
+        set_text(find_child(dialog, None, "Edit", None), "Fresh server")
+        press(dialog, 1)
+        wait_for(lambda: Relay.layouts, "The owner did not load the new server layout")
+        rooms = next(iter(Relay.layouts.values()))
+        assert [(r["kind"], r["name"], r["limit"]) for r in rooms] == [("text", "General", 16), ("voice", "Lounge", 16)]
     finally:
         close_window()
 

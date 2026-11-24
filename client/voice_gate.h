@@ -20,6 +20,7 @@ inline std::uint64_t microphoneGatePower(int threshold, std::size_t sampleCount)
 struct MicrophoneFrame {
     int peakPercent;
     bool transmitting;
+    bool speech;
 };
 
 inline MicrophoneFrame gateMicrophoneFrame(std::span<std::int16_t> samples,
@@ -34,5 +35,6 @@ inline MicrophoneFrame gateMicrophoneFrame(std::span<std::int16_t> samples,
     }
     const bool allowed = microphoneAllowed && power >= minimumPower;
     if (!allowed) std::fill(samples.begin(), samples.end(), 0);
-    return {peak * 100 / 32768, allowed};
+    // A fully open gate can transmit digital silence. Use an RMS floor near -55 dBFS for the indicator.
+    return {peak * 100 / 32768, allowed, allowed && power > 3400 * samples.size()};
 }

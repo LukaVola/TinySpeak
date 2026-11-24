@@ -37,7 +37,7 @@ const std::vector<std::wstring> colorNames{L"Red", L"Orange", L"Yellow", L"Lime"
 enum Control { ServerList = 100, NewServer, Join, Actions, Profile, Settings, Archive, Tree, Transcript, Message, Send,
     Invite, LeaveServer, DeleteServer, AddTextRoom, AddVoiceRoom, DeleteRoom, Kick, Export,
     Mic, LeaveVoice, ParticipantVolume, MicSlider, OutputSlider, MuteParticipant, KickVoice, RenameRoom, LeaveText, InviteCode,
-    OpenChatFile, RestoreWindow, QuitApp };
+    OpenChatFile, RestoreWindow, QuitApp, SetRoomLimit, CopyProfileCode, ForgetMember };
 constexpr unsigned serverMenuBase = 1000;
 constexpr int maxMicrophoneGain = 150;
 constexpr int maxOutputGain = 110;
@@ -199,7 +199,10 @@ private:
     UINT taskbarCreated = 0;
     std::wstring hiddenDraft;
     bool rebuilding = false, closing = false;
-    bool textClosed = false;
+    bool textClosed = false, offlineExpanded = false;
+    bool micPending = false;
+    int publishedMic = -1, shownMic = -1;
+    ULONGLONG retryMicAt = 0;
     bool directHosting = true, hostStarting = false, onHost = false, hostInternet = false, parkedRegistered = false;
     bool fivePercentSteps = true;
     EqualizerGains savedEqualizer{};
@@ -210,7 +213,7 @@ private:
     ULONGLONG clockNext = 0, retryAt = 0, joinUntil = 0, nextRegistration = 0, probeAt = 0, guestOfflineSince = 0;
     unsigned timerInterval = 250;
     std::wstring address{localAddress}, microphone, playback, status{L"Connecting to the relay…"};
-    std::string name, id, initialInvite, pendingJoin, currentText, currentVoice, profileSecret;
+    std::string name, id, initialInvite, pendingJoin, currentText, currentVoice, profileSecret, publicCode;
     std::wstring hostAddress, guestAddress;
     std::string hostRoute, hostTicket, parkedID, hostJoin, guestInvite, candidateInvite, afterRegistration;
     int guestTurnPort = 0;
@@ -224,6 +227,10 @@ private:
     std::vector<std::pair<std::string, std::string>> serverRows;
     Json state = Json::object();
     std::unordered_map<HTREEITEM, Node> nodes;
+    std::unordered_map<std::string, HTREEITEM> memberItems;
+    std::unordered_map<std::string, size_t> memberIndices;
+    struct MicState { std::uint64_t seq; bool muted, speaking; };
+    std::unordered_map<std::string, MicState> microphones;
     std::unordered_map<std::string, std::deque<ChatMessage>> chat;
     std::deque<std::pair<fs::path, std::string>> logs;
     std::size_t chatBytes = 0;
@@ -267,6 +274,11 @@ private:
     void refreshServers();
     void applyState(const Json& data);
     void refreshTree();
+    bool speakingNow() const;
+    int memberImage(const Json& member) const;
+    void updateMemberImage(const std::string& session);
+    void mergeMic(const std::string& session, const Json& source);
+    void publishMic();
     void refreshChat();
     void refreshActions();
     void updateParticipantVolumes();
@@ -277,6 +289,7 @@ private:
     int participantVolume(const Json& member) const;
     void promptParticipantVolume(const std::string& session);
     void treeMenu(const Node& node, const POINT& screen);
+    bool treeContext(POINT screen);
     void saveVoicePreferences();
     void redrawAudioPanel();
     void configureVolumeSliders();
@@ -339,6 +352,7 @@ void App::load() {
     archiveChat = savedValue(doc, "local_chat", true);
     retainOwned = savedValue(doc, "save_owned", true);
     closeToTray = savedValue(doc, "close_to_tray", true);
+    offlineExpanded = savedValue(doc, "offline_expanded", false);
     microphone = wide(savedValue(doc, "microphone", ""));
     playback = wide(savedValue(doc, "playback", ""));
     audio.mode = std::clamp(savedValue(doc, "audio_mode", 0), 0, 2);
@@ -349,7 +363,8 @@ void App::load() {
     savedThreshold = std::clamp(savedValue(doc, "mic_threshold", microphoneThresholdDefault), 0, microphoneThresholdMax);
     audio.threshold = savedThreshold;
     audio.bitrateKbps = validatedVoiceBitrate(savedValue(doc, "voice_bitrate_kbps", defaultVoiceBitrate));
-    pushKey = std::clamp(savedValue(doc, "ptt", VK_F8), VK_F6, VK_F12);
+    pushKey = savedValue(doc, "ptt", VK_F8);
+    if (pushKey < 1 || pushKey > 254) pushKey = VK_F8;
     if (remember) {
         for (const auto& bookmark : arrayOr(doc, "bookmarks")) {
             auto code = savedValue(bookmark, "code", "");
@@ -386,6 +401,7 @@ void App::load() {
         profileSecret = randomCode(40);
         saveVoicePreferences();
     }
+    publicCode = profileCode(profileSecret);
     wchar_t demoAddress[256]{};
     const DWORD length = GetEnvironmentVariableW(L"KANAL_DEMO_ADDRESS", demoAddress, ARRAYSIZE(demoAddress));
     if (length && length < ARRAYSIZE(demoAddress)) {
@@ -417,7 +433,7 @@ void App::save() {
         {"local_chat", archiveChat}, {"save_owned", retainOwned}, {"microphone", utf8(microphone)},
         {"playback", utf8(playback)}, {"audio_mode", audio.mode.load()}, {"mic_gain", audio.inputGain.load()},
         {"output_gain", audio.outputGain.load()}, {"mic_threshold", savedThreshold}, {"mic_muted", audio.muted.load()},
-        {"playback_eq_db", savedEqualizer}, {"normalization_percent", savedNormalization}, {"close_to_tray", closeToTray},
+        {"playback_eq_db", savedEqualizer}, {"normalization_percent", savedNormalization}, {"close_to_tray", closeToTray}, {"offline_expanded", offlineExpanded},
         {"voice_bitrate_kbps", audio.bitrateKbps.load()}, {"five_percent_steps", fivePercentSteps}, {"ptt", pushKey}};
     if (rememberColor) doc["color"] = color;
     if (remember) {
@@ -458,7 +474,7 @@ void App::registerClient() {
     if (!network || registering) return;
     registering = true;
     nextRegistration = GetTickCount64() + 4000;
-    sendRequest({{"op", "register"}, {"name", name}, {"color", color}, {"profile", profileSecret}});
+    sendRequest({{"op", "register"}, {"name", name}, {"color", color}, {"profile", profileSecret}, {"voice_indicators", true}, {"muted", audio.muted.load()}});
 }
 
 void App::startNetwork(const std::wstring& endpoint) {
@@ -535,7 +551,7 @@ void App::parkedHostResult(NetworkResult result) {
         }
     } else if (reply.value("expired", false) && parkedRegistered) {
         parkedRegistered = false;
-        parkedHost->send({{"op", "register"}, {"name", name}, {"color", color}, {"profile", profileSecret}});
+        parkedHost->send({{"op", "register"}, {"name", name}, {"color", color}, {"profile", profileSecret}, {"voice_indicators", true}, {"muted", audio.muted.load()}});
     }
     for (const auto& event : arrayOr(reply, "events")) handleEvent(event, parkedHost.get());
 }
@@ -560,7 +576,7 @@ void App::tickHelpers() {
                 parkedGeneration = ++nextGeneration;
                 parkedRegistered = false;
                 parkedHost = std::make_unique<Network>(window, hostAddress, parkedGeneration);
-                parkedHost->send({{"op", "register"}, {"name", name}, {"color", color}, {"profile", profileSecret}});
+                parkedHost->send({{"op", "register"}, {"name", name}, {"color", color}, {"profile", profileSecret}, {"voice_indicators", true}, {"muted", audio.muted.load()}});
             }
             refreshActions();
         }
@@ -665,8 +681,12 @@ void App::catalog() {
     }
     if (!connected) return;
     Json codes = Json::array();
-    for (const auto& [code, _] : bookmarks) {
-        if (!owned.contains(code) && codes.size() < 512) codes.push_back(code);
+    auto it = bookmarks.upper_bound(lastProbedBookmark);
+    for (size_t count = 0; count < bookmarks.size() && codes.size() < 512; ++count) {
+        if (it == bookmarks.end()) it = bookmarks.begin();
+        lastProbedBookmark = it->first;
+        if (!owned.contains(it->first)) codes.push_back(it->first);
+        ++it;
     }
     if (!codes.empty()) sendRequest({{"op", "catalog"}, {"codes", codes}});
     else if (!available.empty()) {
@@ -693,6 +713,10 @@ void App::applyState(const Json& data) {
     state = data;
     if (active() != old) {
         if (auto item = owned.find(old); item != owned.end() && saveLayout(item->second)) item->second.rooms = Json{};
+        microphones.clear();
+        publishedMic = -1;
+        micPending = false;
+        retryMicAt = 0;
         currentText.clear();
         textClosed = false;
         currentVoice.clear();
@@ -706,17 +730,30 @@ void App::applyState(const Json& data) {
         currentVoice.clear();
         audio.disconnect();
     }
-    bool sameRoom = false;
-    std::string firstText;
-    for (const auto& room : arrayOr(state, "rooms")) {
-        if (room.value("kind", "") != "text") continue;
-        if (firstText.empty()) firstText = room.value("id", "");
-        sameRoom |= room.value("id", "") == currentText;
+    memberIndices.clear();
+    if (const auto users = state.find("users"); users != state.end() && users->is_array()) {
+        for (size_t i = 0; i < users->size(); ++i) {
+            const auto& member = (*users)[i];
+            const auto session = member.value("id", "");
+            memberIndices[session] = i;
+            mergeMic(session, member);
+        }
     }
-    if (!sameRoom) {
-        currentText = textClosed ? std::string{} : firstText;
-        refreshChat();
+    std::erase_if(microphones, [this](const auto& item) { return !memberIndices.contains(item.first); });
+    const auto beforeText = currentText;
+    if (state.contains("text_room")) {
+        currentText = state.value("text_room", "");
+    } else {
+        std::string first;
+        bool found = false;
+        for (const auto& room : arrayOr(state, "rooms")) {
+            if (room.value("kind", "") != "text") continue;
+            if (first.empty()) first = room.value("id", "");
+            found |= room.value("id", "") == currentText;
+        }
+        if (!found) currentText = textClosed ? std::string{} : first;
     }
+    if (beforeText != currentText || old != active()) refreshChat();
     if (auto pos = owned.find(active()); pos != owned.end()) {
         auto layout = arrayOr(state, "rooms");
         if (pos->second.rooms != layout) {
@@ -736,12 +773,59 @@ void App::applyState(const Json& data) {
     refreshActions();
 }
 
+bool App::speakingNow() const {
+    if (currentVoice.empty() || audio.status != 2 || audio.muted || (audio.mode == 1 && !audio.push)) return false;
+    const auto last = audio.lastSpeechAt.load();
+    return last && GetTickCount64() - last < 260;
+}
+
+void App::mergeMic(const std::string& session, const Json& data) {
+    const auto sequence = data.value("mic_seq", std::uint64_t{0});
+    auto& mic = microphones[session];
+    if (sequence >= mic.seq) mic = {sequence, data.value("muted", false), data.value("speaking", false)};
+}
+
+int App::memberImage(const Json& member) const {
+    const auto session = member.value("id", "");
+    const auto mic = microphones.find(session);
+    const bool muted = session == id ? audio.muted.load() :
+        (mic != microphones.end() && mic->second.muted) || mutedParticipants.contains(peerKey(member));
+    const bool speaking = session == id ? speakingNow() : mic != microphones.end() && mic->second.speaking;
+    return std::clamp(member.value("color", 0), 0, 15) * 4 + (muted ? 3 : speaking ? 2 : 1);
+}
+
+void App::updateMemberImage(const std::string& session) {
+    auto row = memberItems.find(session);
+    auto idx = memberIndices.find(session);
+    if (!tree || inTray || row == memberItems.end() || idx == memberIndices.end()) return;
+    TVITEMW item{};
+    item.mask = TVIF_IMAGE | TVIF_SELECTEDIMAGE;
+    item.hItem = row->second;
+    item.iImage = item.iSelectedImage = memberImage(state.at("users").at(idx->second));
+    TreeView_SetItem(tree, &item);
+}
+
+void App::publishMic() {
+    if (!connected || memberIndices.empty()) return;
+    const bool muted = audio.muted.load(), speaking = speakingNow();
+    const int flags = muted ? 2 : speaking ? 1 : 0;
+    if (flags != shownMic) {
+        shownMic = flags;
+        updateMemberImage(id);
+    }
+    if (micPending || flags == publishedMic || GetTickCount64() < retryMicAt || !state.value("voice_indicators", false)) return;
+    micPending = true;
+    publishedMic = flags;
+    sendRequest({{"op", "mic_status"}, {"code", active()}, {"room", currentVoice}, {"muted", muted}, {"speaking", speaking}});
+}
+
 void App::refreshTree() {
     if (!tree || inTray) return;
     rebuilding = true;
     SendMessageW(tree, WM_SETREDRAW, FALSE, 0);
     TreeView_DeleteAllItems(tree);
     nodes.clear();
+    memberItems.clear();
     auto add = [&](HTREEITEM parent, std::wstring text, Node data, int image = I_IMAGENONE) {
         TVINSERTSTRUCTW entry{};
         entry.hParent = parent;
@@ -754,14 +838,15 @@ void App::refreshTree() {
         return handle;
     };
     if (!active().empty()) {
-        auto texts = add(TVI_ROOT, L"Text rooms", {});
-        auto voices = add(TVI_ROOT, L"Voice rooms", {});
+        auto texts = add(TVI_ROOT, L"Text rooms", {"text_group", {}});
+        auto voices = add(TVI_ROOT, L"Voice rooms", {"voice_group", {}});
         auto present = add(TVI_ROOT, L"Online", {});
+        auto offline = add(TVI_ROOT, L"Offline", {"offline_group", {}});
         HTREEITEM selected = nullptr;
         std::unordered_map<std::string, HTREEITEM> rooms;
         for (const auto& r : arrayOr(state, "rooms")) {
             const auto kind = r.value("kind", ""), code = r.value("id", "");
-            auto label = (kind == "text" ? L"# " : L"") + wide(r.value("name", ""));
+            auto label = wide(r.value("name", ""));
             if (state.value("voice", "") == code) label += L"  ✓";
             auto item = add(kind == "text" ? texts : voices, std::move(label), {kind, code});
             rooms.emplace(code, item);
@@ -772,11 +857,15 @@ void App::refreshTree() {
             auto label = wide(member.value("name", ""));
             if (memberID == state.value("owner", "")) label += L"  · owner";
             if (memberID == id) label += L"  (you)";
-            else if (mutedParticipants.contains(peerKey(member))) label += L"  · muted";
             auto voice = rooms.find(member.value("voice", ""));
             auto parent = voice == rooms.end() ? present : voice->second;
-            add(parent, std::move(label), {"user", memberID}, std::clamp(member.value("color", 0), 0, 15));
+            memberItems[memberID] = add(parent, std::move(label), {"user", memberID}, memberImage(member));
         }
+        for (const auto& member : arrayOr(state, "offline")) {
+            add(offline, wide(member.value("name", "")), {"offline_user", member.value("profile_code", "")},
+                std::clamp(member.value("color", 0), 0, 15) * 4);
+        }
+        if (offlineExpanded) TreeView_Expand(tree, offline, TVE_EXPAND);
         for (const auto& [_, node] : rooms) TreeView_Expand(tree, node, TVE_EXPAND);
         for (auto root : {texts, voices, present}) TreeView_Expand(tree, root, TVE_EXPAND);
         if (selected) TreeView_SelectItem(tree, selected);
@@ -912,7 +1001,7 @@ void App::appendChat(const Json& event) {
         std::string title = event.value("name", "Room") + "   [" + code + "]\r\n\r\n";
         logs.emplace_back(path, title + '\0' + message.exportLine());
     }
-    if (code != active()) return;
+    if (code != active() || event.value("type", "") == "archive_chat") return;
     auto& messages = chat[room];
     bool trim = false;
     chatBytes += message.size();
@@ -966,7 +1055,7 @@ void App::handleEvent(const Json& e, Network* source) {
             auto rooms = src.rooms.is_array() ? src.rooms : loadJson(directory / L"servers" / wide(code + ".json"));
             if (rooms.is_array() && source) source->send({{"op", "hydrate"}, {"code", code}, {"rooms", std::move(rooms)}});
         }
-    } else if (type == "chat") {
+    } else if (type == "chat" || type == "archive_chat") {
         appendChat(e);
     } else if (type == "closed" || type == "kicked") {
         if (type == "closed") available.erase(code);
@@ -993,7 +1082,15 @@ void App::onNetwork(NetworkResult result) {
         if (response.value("restored", false)) guestOfflineSince = 0;
     }
     if (op == "register") registering = false;
+    if (op == "mic_status" && request.value("code", "") == active()) {
+        micPending = false;
+        if (response.contains("error")) { publishedMic = -1; retryMicAt = GetTickCount64() + 1500; }
+    }
     if (response.contains("error")) {
+        if ((op == "text_enter" || op == "text_leave") && request.value("code", "") == active()) {
+            refreshTree();
+            if (response.value("network", false)) sendRequest({{"op", "sync"}, {"code", active()}});
+        }
         statusText(wide(response.value("error", "")));
         if (op == "join") pendingJoin.clear();
         if (response.value("expired", false) && connected) {
@@ -1032,16 +1129,31 @@ void App::onNetwork(NetworkResult result) {
         return;
     }
     const auto replyVersion = response.value("version", std::uint64_t{0});
-    if (replyVersion >= version) {
+    if (replyVersion >= version && (response.contains("state") || response.value("reset", false))) {
         version = replyVersion;
         if (response.contains("state")) applyState(response.at("state"));
         else if (response.value("reset", false)) applyState(Json::object());
     }
+    if (response.value("mic_code", "") == active() && response.contains("mic")) {
+        for (const auto& [session, mic] : response.at("mic").items()) {
+            if (!memberIndices.contains(session)) continue;
+            mergeMic(session, mic);
+            updateMemberImage(session);
+        }
+    }
+    if (response.value("restored", false) && state.value("voice_indicators", false)) {
+        sendRequest({{"op", "sync"}, {"code", active()}});
+        publishedMic = -1;
+    }
     for (const auto& e : arrayOr(response, "events")) handleEvent(e, network.get());
     if (response.value("restored", false)) statusText(L"Connection to the relay restored.");
     if (op == "catalog") {
-        std::map<std::string, std::string> latest;
-        for (const auto& item : arrayOr(response, "catalog")) latest[item.value("code", "")] = item.value("name", "");
+        auto latest = available;
+        for (const auto& code : arrayOr(request, "codes")) latest.erase(code.get<std::string>());
+        for (const auto& item : arrayOr(response, "catalog")) {
+            const auto code = item.value("code", "");
+            if (remember && bookmarks.contains(code)) latest[code] = item.value("name", "");
+        }
         if (latest != available) {
             available = std::move(latest);
             refreshServers();
@@ -1056,10 +1168,6 @@ void App::onNetwork(NetworkResult result) {
         } else {
             pendingJoin.clear();
             if (remember && !owned.contains(active())) {
-                if (bookmarks.size() >= 512 && !bookmarks.contains(active())) {
-                    bookmarkInvites.erase(bookmarks.begin()->first);
-                    bookmarks.erase(bookmarks.begin());
-                }
                 bookmarks[active()] = state.value("name", "");
                 if (directHosting && !guestInvite.empty()) {
                     bookmarkInvites[active()] = guestInvite;
@@ -1082,6 +1190,7 @@ void App::onNetwork(NetworkResult result) {
         available.erase(code);
         std::error_code ec;
         fs::remove(directory / L"servers" / wide(code + ".json"), ec);
+        fs::remove(directory / L"servers" / wide(code + ".members.json"), ec);
         save();
         refreshServers();
         statusText(L"Server deleted.");
@@ -1096,6 +1205,8 @@ void App::onNetwork(NetworkResult result) {
             }
             audio.connect(url, response.value("token", ""), microphone, playback, std::move(relay));
         }
+    } else if (op == "room_limit" && request.value("code", "") == active()) {
+        statusText(L"Room limit set to " + std::to_wstring(request.value("limit", 16)) + L".");
     } else if (op == "leave") {
         statusText(L"You left the server.");
     }
@@ -1167,8 +1278,8 @@ void App::promptCreate() {
     auto secret = randomCode(40);
     auto code = inviteCode(secret);
     auto rooms = Json::array({
-        {{"id", randomCode(12)}, {"kind", "text"}, {"name", "general"}},
-        {{"id", randomCode(12)}, {"kind", "voice"}, {"name", "Lounge"}}
+        {{"id", randomCode(12)}, {"kind", "text"}, {"name", "General"}, {"limit", 16}},
+        {{"id", randomCode(12)}, {"kind", "voice"}, {"name", "Lounge"}, {"limit", 16}}
     });
     auto& item = owned.emplace(code, Owned{code, utf8(title), std::move(secret), std::move(rooms)}).first->second;
     if (!directHosting || (onHost && connected)) advertise(item);
@@ -1179,7 +1290,8 @@ void App::promptCreate() {
 
 void App::promptProfile() {
     std::vector<Field> fields{{Field::Text, L"Username (4–32 characters)", wide(name)},
-        {Field::Choice, L"Profile color", L"", colorNames, color}};
+        {Field::Choice, L"Profile color", L"", colorNames, color},
+        {Field::ReadOnly, L"Profile code", wide(publicCode)}};
     fields[1].swatches = theme::profile.data();
     if (!form(window, L"Username and color", fields)) return;
     auto label = fields[0].text;
@@ -1251,7 +1363,7 @@ void App::promptSettings() {
     const int originalBitrate = audio.bitrateKbps.load();
     std::vector<std::wstring> bitrates;
     for (int value : voiceBitrates) {
-        bitrates.push_back(std::to_wstring(value) + (value == defaultVoiceBitrate ? L" kbps - normal quality" : L" kbps"));
+        bitrates.push_back(std::to_wstring(value) + L" kbps");
     }
     const int selectedBitrate = static_cast<int>(std::find(voiceBitrates.begin(), voiceBitrates.end(), originalBitrate) - voiceBitrates.begin());
     std::vector<Field> fields{
@@ -1261,7 +1373,7 @@ void App::promptSettings() {
         {Field::Action, L"Playback equalizer and normalization…"},
         {Field::Choice, L"Microphone mode", L"", {L"Voice activation", L"Push-to-talk", L"Open microphone"}, audio.mode.load()},
         {Field::Slider, L"Microphone threshold (relative dB, 0 = off)", L"", {}, originalThreshold},
-        {Field::Choice, L"Push-to-talk key", L"", {L"F6", L"F7", L"F8", L"F9", L"F10", L"F11", L"F12"}, pushKey - VK_F6},
+        {Field::Key, L"Push-to-talk key", L"", {}, pushKey},
         {Field::Choice, L"Microphone bitrate", L"", std::move(bitrates), selectedBitrate},
         {Field::Check, L"5% volume steps (1% from 0% to 5%)", L"", {}, fivePercentSteps},
         {Field::Check, L"Remember servers I join", L"", {}, remember},
@@ -1296,7 +1408,7 @@ void App::promptSettings() {
     microphone = selectDevice(mics, fields[InputDevice].selected, prevMic);
     playback = selectDevice(speakers, fields[OutputDevice].selected, prevPlayback);
     if (fields[InputMode].selected >= 0) audio.mode = fields[InputMode].selected;
-    if (fields[TalkKey].selected >= 0) pushKey = VK_F6 + fields[TalkKey].selected;
+    pushKey = fields[TalkKey].selected;
     if (const int bitrate = fields[Bitrate].selected; bitrate >= 0 && static_cast<std::size_t>(bitrate) < voiceBitrates.size()) {
         audio.bitrateKbps = voiceBitrates[bitrate];
     }
@@ -1317,6 +1429,7 @@ void App::promptSettings() {
             auto path = directory / L"servers" / wide(code + ".json");
             if (!item.rooms.is_array()) item.rooms = loadJson(path);
             fs::remove(path, ec);
+            fs::remove(directory / L"servers" / wide(code + ".members.json"), ec);
         }
     }
     if (!remember) {
@@ -1499,6 +1612,10 @@ void App::selectTree() {
     if (rebuilding) return;
     auto entry = nodes.find(TreeView_GetSelection(tree));
     if (entry != nodes.end() && entry->second.kind == "text" && entry->second.id != currentText) {
+        if (state.contains("text_room")) {
+            sendRequest({{"op", "text_enter"}, {"code", active()}, {"room", entry->second.id}});
+            return;
+        }
         textClosed = false;
         currentText = entry->second.id;
         refreshChat();
@@ -1513,9 +1630,20 @@ void App::treeMenu(const Node& node, const POINT& screen) {
     const auto member = node.kind == "user" ? voicePeer(node.id) : Json::object();
     const auto peer = member.empty() ? std::string{} : peerKey(member);
     const auto targetRoom = node.kind == "user" ? participantRoom(node.id) : std::string{};
+    auto profile = node.kind == "offline_user" ? node.id : std::string{};
+    if (node.kind == "user") {
+        if (const auto it = memberIndices.find(node.id); it != memberIndices.end())
+            profile = state.at("users").at(it->second).value("profile_code", "");
+        if (node.id == id) profile = publicCode;
+    }
+    if (owner() && (node.kind == "text" || node.kind == "text_group"))
+        entries.push_back({AddTextRoom, L"New text room…"});
+    if (owner() && (node.kind == "voice" || node.kind == "voice_group"))
+        entries.push_back({AddVoiceRoom, L"New voice room…"});
     if (node.kind == "voice" || node.kind == "text") {
         if (node.kind == "voice" && node.id == voice) entries.push_back({LeaveVoice, L"Leave voice room"});
         if (node.kind == "text" && node.id == currentText) entries.push_back({LeaveText, L"Leave text channel"});
+        if (owner() && state.contains("text_room")) entries.push_back({SetRoomLimit, L"Set room limit…"});
         if (owner()) entries.push_back({RenameRoom, node.kind == "voice" ? L"Rename room…" : L"Rename channel…"});
     } else if (node.kind == "user") {
         if (!peer.empty()) {
@@ -1524,15 +1652,46 @@ void App::treeMenu(const Node& node, const POINT& screen) {
         }
         if (owner() && !targetRoom.empty()) entries.push_back({KickVoice, L"Remove from voice room"});
     }
+    if (validCode(profile)) entries.push_back({CopyProfileCode, L"Copy profile code"});
+    if (owner() && node.kind == "offline_user") entries.push_back({ForgetMember, L"Remove from server"});
     if (entries.empty()) return;
     const auto action = showMenu(window, tree, std::move(entries), false, &screen);
     if (active() != code) return;
     switch (action) {
+    case AddTextRoom: addRoom(true); break;
+    case AddVoiceRoom: addRoom(false); break;
+    case SetRoomLimit: {
+        if (!owner()) break;
+        for (const auto& room : arrayOr(state, "rooms")) {
+            if (room.value("id", "") != node.id) continue;
+            const int previous = room.value("limit", 0);
+            std::vector<std::wstring> sizes;
+            for (int n = 1; n <= 16; ++n) sizes.push_back(std::to_wstring(n));
+            std::vector<Field> fields{{Field::Choice, L"Maximum people in " + wide(room.value("name", "")), L"",
+                std::move(sizes), (previous >= 1 && previous <= 16 ? previous : 16) - 1}};
+            if (form(window, L"Room limit", fields) && active() == code && owner())
+                sendRequest({{"op", "room_limit"}, {"code", code}, {"room", node.id}, {"limit", fields[0].selected + 1}});
+            break;
+        }
+        break;
+    }
+    case CopyProfileCode:
+        if (validCode(profile)) { clipboard(window, wide(profile)); statusText(L"Profile code copied."); }
+        break;
+    case ForgetMember:
+        if (owner() && node.kind == "offline_user" && MessageBoxW(window, L"Remove this offline member from the server?",
+            L"TinySpeak", MB_YESNO | MB_ICONQUESTION) == IDYES)
+            sendRequest({{"op", "forget_member"}, {"code", code}, {"target", profile}});
+        break;
     case LeaveVoice:
         if (state.value("voice", "") == node.id) command(LeaveVoice, 0);
         break;
     case LeaveText:
         if (currentText == node.id) {
+            if (state.contains("text_room")) {
+                sendRequest({{"op", "text_leave"}, {"code", code}, {"room", node.id}});
+                break;
+            }
             textClosed = true;
             currentText.clear();
             TreeView_SelectItem(tree, nullptr);
@@ -1552,7 +1711,7 @@ void App::treeMenu(const Node& node, const POINT& screen) {
         if (!peer.empty() && !voicePeer(node.id).empty()) {
             if (!mutedParticipants.erase(peer)) mutedParticipants.insert(peer);
             updateParticipantVolumes();
-            refreshTree();
+            updateMemberImage(node.id);
             saveVoicePreferences();
         }
         break;
@@ -1565,6 +1724,29 @@ void App::treeMenu(const Node& node, const POINT& screen) {
         }
         break;
     }
+}
+
+bool App::treeContext(POINT screen) {
+    if (!tree || inTray || closing) return false;
+    HTREEITEM item{};
+    if (screen.x == -1 && screen.y == -1) {
+        item = TreeView_GetSelection(tree);
+        RECT bounds{};
+        if (!item || !TreeView_GetItemRect(tree, item, &bounds, TRUE)) return false;
+        screen = {bounds.left, bounds.bottom};
+        ClientToScreen(tree, &screen);
+    } else {
+        TVHITTESTINFO hit{};
+        hit.pt = screen;
+        ScreenToClient(tree, &hit.pt);
+        item = TreeView_HitTest(tree, &hit);
+    }
+    auto found = nodes.find(item);
+    if (found == nodes.end()) return false;
+    // Menu and dialog message loops may rebuild the tree while this command is open.
+    const auto selected = found->second;
+    treeMenu(selected, screen);
+    return true;
 }
 
 LRESULT App::onNotify(NMHDR* note) {
@@ -1584,19 +1766,19 @@ LRESULT App::onNotify(NMHDR* note) {
                 return CDRF_NEWFONT;
             }
         }
+        if (note->code == TVN_ITEMEXPANDEDW && !rebuilding) {
+            const auto& change = *reinterpret_cast<NMTREEVIEWW*>(note);
+            const auto entry = nodes.find(change.itemNew.hItem);
+            if (entry != nodes.end() && entry->second.kind == "offline_group") {
+                offlineExpanded = (change.itemNew.state & TVIS_EXPANDED) != 0;
+                save();
+            }
+        }
         if (note->code == TVN_SELCHANGEDW) selectTree();
         if (note->code == NM_RCLICK) {
             const DWORD cursor = GetMessagePos();
             const POINT screen{GET_X_LPARAM(cursor), GET_Y_LPARAM(cursor)};
-            TVHITTESTINFO hit{};
-            hit.pt = screen;
-            ScreenToClient(tree, &hit.pt);
-            const auto node = nodes.find(TreeView_HitTest(tree, &hit));
-            if (node != nodes.end()) {
-                const auto selected = node->second;
-                treeMenu(selected, screen);
-                return TRUE;
-            }
+            if (treeContext(screen)) return TRUE;
         }
         const bool activated = note->code == NM_DBLCLK ||
             (note->code == TVN_KEYDOWN && reinterpret_cast<NMTVKEYDOWN*>(note)->wVKey == VK_RETURN);
@@ -1675,6 +1857,7 @@ void App::command(int which, int notification) {
     }
     case Mic:
         audio.muted = !audio.muted;
+        publishMic();
         save();
         refreshActions();
         statusText(audio.muted ? L"Microphone muted." : L"Microphone unmuted.");
@@ -1740,6 +1923,7 @@ void App::tick() {
         audio.push = down;
     }
     statusAudio();
+    publishMic();
     const auto now = GetTickCount64();
     if (saveGainsAt && saveGainsAt <= now) save();
     if (retryAt && retryAt <= now) {
@@ -1860,10 +2044,12 @@ void App::createView() {
     TreeView_SetTextColor(tree, theme::text);
     TreeView_SetLineColor(tree, theme::edge);
     const int k = MulDiv(17, dpi, 96);
-    icons = ImageList_Create(k, k, ILC_COLOR32, static_cast<int>(theme::profile.size()), 1);
+    const int dot = std::max(3, MulDiv(7, dpi, 96));
+    const int width = k + dot + std::max(2, MulDiv(3, dpi, 96));
+    icons = ImageList_Create(width, k, ILC_COLOR32, static_cast<int>(theme::profile.size()) * 4, 1);
     BITMAPINFO dib{};
     dib.bmiHeader.biSize = sizeof(dib.bmiHeader);
-    dib.bmiHeader.biWidth = k;
+    dib.bmiHeader.biWidth = width;
     dib.bmiHeader.biHeight = -k;
     dib.bmiHeader.biPlanes = 1;
     dib.bmiHeader.biBitCount = 32;
@@ -1875,16 +2061,21 @@ void App::createView() {
             return 0xff000000u | (GetRValue(color) << 16) | (GetGValue(color) << 8) | GetBValue(color);
         };
         const int radius = k - 4, inner = radius - 3;
+        const std::array<COLORREF, 4> statusColors{0, theme::white, theme::profile[4], theme::profile[0]};
         for (auto color : theme::profile) {
-            const auto opaque = pixel(color);
-            for (int y = 0; y < k; ++y) {
-                for (int x = 0; x < k; ++x) {
-                    const int dx = x * 2 + 1 - k, dy = y * 2 + 1 - k;
-                    const int d = dx * dx + dy * dy;
-                    pixels[y * k + x] = d <= inner * inner ? opaque : d <= radius * radius ? pixel(theme::secondary) : 0;
+            for (size_t phase = 0; phase < statusColors.size(); ++phase) {
+                for (int y = 0; y < k; ++y) {
+                    for (int x = 0; x < width; ++x) {
+                        const int dx = x * 2 + 1 - k, dy = y * 2 + 1 - k;
+                        const int d = dx * dx + dy * dy;
+                        const int sx = (x - (width - dot)) * 2 + 1 - dot;
+                        const bool inDot = sx * sx + dy * dy <= dot * dot;
+                        pixels[y * width + x] = d <= inner * inner ? pixel(color) :
+                            d <= radius * radius ? pixel(theme::secondary) : phase && inDot ? pixel(statusColors[phase]) : 0;
+                    }
                 }
+                ImageList_Add(icons, bitmap, nullptr);
             }
-            ImageList_Add(icons, bitmap, nullptr);
         }
         DeleteObject(bitmap);
     }
@@ -1934,6 +2125,7 @@ void App::destroyView() {
     rebuilding = true;
     while (auto child = GetWindow(window, GW_CHILD)) DestroyWindow(child);
     nodes.clear();
+    memberItems.clear();
     servers = tree = transcript = composer = newServer = join = actions = nullptr;
     muteButton = micSlider = outputSlider = nullptr;
     if (icons) ImageList_Destroy(std::exchange(icons, nullptr));
@@ -2038,7 +2230,7 @@ void App::paint() {
     fillColor(dc, {l.sidebarRight - 1, l.toolbarBottom, l.sidebarRight, l.footerTop}, theme::edge);
     text(l.brand, L"TinySpeak", bold, theme::text);
     text(l.listTitle, L"Rooms", bold, theme::secondary);
-    text(l.chatTitle, currentText.empty() ? L"Chat" : L"#  " + roomName(currentText), heading, theme::text);
+    text(l.chatTitle, currentText.empty() ? L"Chat" : roomName(currentText), heading, theme::text);
     if (active().empty()) {
         auto hint = l.transcript;
         hint.bottom = hint.top + MulDiv(29, dpi, 96);
@@ -2111,6 +2303,10 @@ LRESULT CALLBACK procedure(HWND window, UINT msg, WPARAM wParam, LPARAM lParam) 
         else app->paint();
         return 0;
     case WM_COMMAND: app->command(LOWORD(wParam), HIWORD(wParam)); return 0;
+    case WM_CONTEXTMENU:
+        if (reinterpret_cast<HWND>(wParam) == app->tree &&
+            app->treeContext({GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)})) return 0;
+        break;
     case WM_NOTIFY: return app->onNotify(reinterpret_cast<NMHDR*>(lParam));
     case WM_TIMER: if (wParam == uiTimer) app->tick(); return 0;
     case WM_CLOSE:

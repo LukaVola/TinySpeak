@@ -45,6 +45,7 @@ public:
     void setParticipantVolumes(Volumes volumes);
     // 0 = activation by voice, 1 = push to talk, 2 = open microphone.
     std::atomic_int inputGain{100}, outputGain{100}, mode{0}, level{0}, threshold{microphoneThresholdDefault};
+    std::atomic_uint64_t lastSpeechAt{0};
     std::atomic_int bitrateKbps{defaultVoiceBitrate};
     std::atomic<EqualizerGains> equalizerDb{EqualizerGains{}};
     std::atomic_int normalizationPercent{0};

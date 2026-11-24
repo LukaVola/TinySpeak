@@ -2,7 +2,7 @@
 
 TinySpeak is a portable voice and text chat app for small groups on 64-bit Windows. Your PC hosts the server while TinySpeak is open. You and your friends only need a username and an invite.
 
-**[Download Patch 16 for Windows x64 (ZIP)](https://github.com/LukaVola/TinySpeak/releases/download/patch-16/TinySpeak-Windows-x64.zip)**
+**[Download Patch 17 for Windows x64 (ZIP)](https://github.com/LukaVola/TinySpeak/releases/download/patch-17/TinySpeak-Windows-x64.zip)**
 
 ## Start a conversation
 
@@ -27,13 +27,15 @@ The full Internet invite starts with **TS2-** and contains the information neede
 - Open **Menu → Settings → Playback equalizer and normalization…** to adjust four incoming voice bands from **−12 to +12 dB**. The bands cover 1–200 Hz, 201–400 Hz, 401–1,000 Hz and 1,001–20,000 Hz. All four start at 0 dB.
 - **Voice normalization strength** limits sudden sounds such as a microphone knock. Choose 0% (off), 25%, 50%, 75% or 100%. Higher settings allow smaller peaks above the recent speech level. A new profile starts at 0%. An existing enabled limiter becomes 100%. The EQ and strength preview live and are saved when you confirm both dialogs.
 - Saved levels apply only to your playback. TinySpeak remembers the person across reconnects and username changes when both clients and the relay are on Patch 3 or later. For older clients, TinySpeak uses the name within the current server.
-- Choose the input device, output device and microphone mode in **Menu → Settings**. The default push-to-talk key is **F8**.
+- Choose the input device, output device and microphone mode in **Menu → Settings**. For push-to-talk, click the current binding and press a keyboard key or a mouse button. **F8** is the default.
 - **Microphone threshold** suppresses microphone audio below the chosen level in any microphone mode. **30 dB** is the default, **70 dB** is the maximum, and **0 dB** turns the gate off. The setting uses a digital signal scale starting at −70 dBFS. A setting of 30 dB corresponds to −40 dBFS RMS. **OK** saves the setting locally.
-- **Microphone bitrate** selects a target of **24, 32, 48, 64, 80 or 128 kbps** for your outgoing Opus audio. The default is **32 kbps - normal quality**. Changing it during a call briefly reconnects your audio in the same room.
+- **Microphone bitrate** selects a target of **24, 32, 48, 64, 80 or 128 kbps** for your outgoing Opus audio. The default is **32 kbps**. Changing it during a call briefly reconnects your audio in the same room.
 
 ## Servers, invites and logs
 
-Right-click your voice room or open text channel to leave it. Owners can also rename rooms and channels, and remove someone from a voice room while keeping them on the server.
+Each new server starts with **General** and **Lounge**. Right-click a text or voice room to leave it. Owners can create another room of the same type, rename it, or choose **Set room limit…** (1–16 people). New rooms start at 16. Older text rooms keep their existing capacity until the owner sets a limit. Lowering a limit requires enough people to leave first. Voice and text use separate seats.
+
+The small dot beside a member's profile color is green when they speak, red when their microphone is muted or you have muted them, and white when quiet. The **Offline** group starts collapsed and lists remembered members who are away from this server. Open **Menu → Username and color** for your permanent 16-character profile code, or right-click a member to copy theirs. The host remembers members locally with the saved server.
 
 A new installation saves owned servers, room layouts, bookmarks and local chat logs by default. Existing profiles keep their choices. Only messages received by that computer are archived. Under **Menu → Chat logs**, **Export chat as TXT…** saves the channel’s local log as a UTF-8 TXT file, or the current chat view when logging is off. **Open chat TXT…** directly below it opens a saved file, even when disconnected. Large logs have **Previous page** and **Next page** buttons. **Local chat logs…** in the same submenu also lets you read, export or delete automatic archives.
 

@@ -35,6 +35,10 @@ func TestVoiceProfileSurvivesReconnectAndRename(t *testing.T) {
 		first.User.ProfileID != again.User.ProfileID || again.User.ID == first.User.ID {
 		t.Fatal("profile identity changed with the username or session")
 	}
+	if !validID(first.User.ProfileCode, 16) || first.User.ProfileCode != again.User.ProfileCode || first.User.ProfileCode != updated.User.ProfileCode ||
+		first.User.ProfileCode == other.User.ProfileCode || legacy.User.ProfileCode != "" || profileCode(first.User.ProfileCode) != "" {
+		t.Fatal("public profile code was unstable, shared, or accepted as the private identity")
+	}
 	if other.User.ProfileID == first.User.ProfileID || legacy.User.ProfileID != "" {
 		t.Fatal("independent or legacy clients shared the voice profile identity")
 	}
@@ -64,7 +68,7 @@ func TestServerLifecycleKeepsOnlyLiveMessages(t *testing.T) {
 	if got := s.command(guest, request{Op: "join", Code: code}); !got.Retry || len(host.pending) != 1 || host.pending[0].Type != "load" {
 		t.Fatal("the guest did not wake the unoccupied server")
 	}
-	s.command(host, request{Op: "hydrate", Code: code, Rooms: []room{{textRoom, "tekst", "text"}}})
+	s.command(host, request{Op: "hydrate", Code: code, Rooms: []room{{ID: textRoom, Name: "tekst", Kind: "text"}}})
 	s.command(host, request{Op: "join", Code: code})
 	s.command(guest, request{Op: "join", Code: code})
 	if got := s.command(guest, request{Op: "profile", Name: "luka", Color: 2}); got.Error == "" {
@@ -106,7 +110,7 @@ func TestLimitsAndRoomScopedVoice(t *testing.T) {
 	secret, voiceRoom := randomString(40), randomString(12)
 	code := inviteCode(secret)
 	s.command(host, request{Op: "advertise", Code: code, Secret: secret, Name: "Test"})
-	s.command(host, request{Op: "hydrate", Code: code, Rooms: []room{{voiceRoom, "Glas", "voice"}}})
+	s.command(host, request{Op: "hydrate", Code: code, Rooms: []room{{ID: voiceRoom, Name: "Glas", Kind: "voice"}}})
 	s.command(host, request{Op: "join", Code: code})
 	for i := 0; i < maxRooms; i++ {
 		if s.command(host, request{Op: "room_add", Code: code, Kind: "text", Name: "Soba"}).Error != "" {

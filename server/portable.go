@@ -268,7 +268,7 @@ func directHost(ctx context.Context, profile, voiceBinary string) error {
 	}
 	internalVoice := &url.URL{Scheme: "http", Host: voiceAddress}
 	s := &service{
-		clients: map[string]*client{}, servers: map[string]*server{}, hosted: true,
+		clients: map[string]*client{}, servers: map[string]*server{}, hosted: true, rosterDir: filepath.Join(profile, "servers"),
 		http:  &http.Client{Timeout: 5 * time.Second},
 		voice: voiceConfig{URL: "ws://" + voiceAddress, Admin: internalVoice.String(), Key: "tinyspeak", Secret: key},
 	}
