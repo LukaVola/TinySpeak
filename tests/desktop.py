@@ -240,17 +240,25 @@ def choose_menu(main, command, room=None):
 
     def highlight(handle, menu, index):
         def current():
-            return next((k for k in range(count(menu)) if state(menu, k, 0x0400) & 0x0080), -1)
-        if current() < 0:
-            post(handle, 0x0100, 0x28, 0)  # Down highlights the first command
-            wait_for(lambda: current() >= 0, "Popup keyboard focus")
-        for _ in range(count(menu)):
-            old = current()
-            if old == index:
+            for k in range(count(menu)):
+                flags = state(menu, k, 0x0400)
+                if flags != 0xffffffff and flags & 0x0080:
+                    return k
+            return -1
+
+        def moved(old):
+            new = current()
+            # Native menus briefly clear all highlights between two items.
+            return (new,) if new >= 0 and new != old else None
+
+        selected = current()
+        for _ in range(2 * count(menu) + 2):
+            if selected == index:
                 return
-            post(handle, 0x0100, 0x28, 0)  # Down
-            wait_for(lambda: current() != old, "Popup selection did not move")
-        raise AssertionError("Popup command was not selectable")
+            post(handle, 0x0100, 0x28, 0)
+            selected, = wait_for(lambda: moved(selected), "Popup selection did not move to another item")
+        if selected != index:
+            raise AssertionError(f"Popup selection stopped on {selected}, expected {index}")
 
     if room:
         tree = child(main, 107)
