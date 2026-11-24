@@ -163,9 +163,30 @@ def choose_file(title, path):
     dialog = wait_for(lambda: find("#32770", title), title)
     def file_field():
         combo = child(dialog, 0x047c)  # cmb13 on Explorer-style common dialogs
-        return (find_child(combo, None, "Edit", None) if combo else None) or child(dialog, 0x0480)
-    set_text(wait_for(file_field, "File name edit"), str(path))
-    press(dialog, 1)
+        classic = (find_child(combo, None, "Edit", None) if combo else None) or child(dialog, 0x0480)
+        if classic:
+            return classic
+        # The modern common dialog nests the file-name edit inside a DirectUI host.
+        matches = []
+        visitor = ct.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+        ctrl_id = native(ui, "GetDlgCtrlID", ct.c_int, wt.HWND)
+        parent = native(ui, "GetParent", wt.HWND, wt.HWND)
+        @visitor
+        def visit(w, _):
+            if ctrl_id(w) in (1001, 0x047c) and find_child(parent(w), None, "Edit", None) == w:
+                matches.append(w)
+            return not matches
+        native(ui, "EnumChildWindows", wt.BOOL, wt.HWND, visitor, wt.LPARAM)(dialog, visit, 0)
+        return matches[0] if matches else None
+    field = wait_for(lambda: file_field() if visible(dialog) else None, "File name edit")
+    if title == "Export chat as TXT":
+        wait_for(lambda: "TinySpeak-chat" in get_text(field), "Suggested export name")
+    send(field, 0x00b1, 0, -1)  # select the previous name, then type as the user would
+    for char in str(path):
+        send(field, 0x0102, ord(char), 0)
+    assert get_text(field) == str(path)
+    post(child(dialog, 1), 0x00f5, 0, 0)
+    wait_for(lambda: not visible(dialog), "File dialog did not accept the selected path")
 
 
 def check_files(main, root):
