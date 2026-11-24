@@ -517,14 +517,15 @@ struct Form {
         } else {
             for (auto& f : *fields) {
                 if (!f.visible) continue;
-                if (f.type != Field::Check && f.type != Field::Action) {
+                if (f.hasSeparateLabel()) {
                     auto label = control(window, L"STATIC", f.label.c_str(), SS_LEFT, 0);
                     MoveWindow(label, x, row, bounds.right - x * 2, y + 3, TRUE);
                     row += y + 3;
                 }
-                DWORD style = WS_TABSTOP;
-                if (f.type == Field::Text || f.type == Field::ReadOnly) {
-                    if (f.type == Field::ReadOnly) style |= ES_READONLY;
+                constexpr DWORD style = WS_TABSTOP;
+                if (f.type == Field::Info) {
+                    f.input = control(window, L"STATIC", f.label.c_str(), SS_LEFT | SS_NOPREFIX | SS_CENTERIMAGE, -1);
+                } else if (f.type == Field::Text) {
                     f.input = control(window, L"EDIT", f.text.c_str(), style | ES_AUTOHSCROLL, 100 + row, WS_EX_CLIENTEDGE);
                     SendMessageW(f.input, EM_LIMITTEXT, 512, 0);
                 } else if (f.type == Field::Key) {
@@ -563,7 +564,7 @@ struct Form {
         if (!log) {
             auto cancel = control(window, L"BUTTON", L"Cancel", WS_TABSTOP | BS_OWNERDRAW, IDCANCEL);
             MoveWindow(cancel, bounds.right - x * 2 - button * 2, bounds.bottom - y * 3, button, height, TRUE);
-            const auto first = std::find_if(fields->begin(), fields->end(), [](const Field& f) { return f.visible; });
+            const auto first = std::find_if(fields->begin(), fields->end(), [](const Field& f) { return f.visible && f.type != Field::Info; });
             if (first != fields->end()) {
                 SetFocus(first->input);
                 if (first->type == Field::Text) SendMessageW(first->input, EM_SETSEL, 0, -1);
@@ -591,7 +592,7 @@ std::filesystem::path chooseTextExport(HWND parent, const wchar_t* title, const 
 
 bool form(HWND owner, const wchar_t* title, std::vector<Field>& fields) {
     int height = 36;
-    for (const auto& f : fields) if (f.visible) height += f.type == Field::Check || f.type == Field::Action ? 17 : 27;
+    for (const auto& f : fields) if (f.visible) height += f.hasSeparateLabel() ? 27 : 17;
     EmptyDialog layout(278, static_cast<short>(height));
     Form data{title, &fields, nullptr};
     return DialogBoxIndirectParamW(GetModuleHandleW(nullptr), &layout.dialog, owner, Form::procedure,

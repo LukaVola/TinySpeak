@@ -1360,7 +1360,7 @@ void App::promptCreate() {
 void App::promptProfile() {
     std::vector<Field> fields{{Field::Text, L"Username (4–32 characters)", wide(name)},
         {Field::Choice, L"Profile color", L"", colorNames, color},
-        {Field::ReadOnly, L"Profile code", wide(publicCode)}};
+        {Field::Info, L"Profile code (read-only)  ·  " + wide(publicCode)}};
     fields[1].swatches = theme::profile.data();
     if (!form(window, L"Username and color", fields)) return;
     auto label = fields[0].text;

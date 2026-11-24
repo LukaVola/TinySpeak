@@ -49,7 +49,7 @@ bool measureMenu(HWND owner, MEASUREITEMSTRUCT& item);
 bool drawMenu(const DRAWITEMSTRUCT& item);
 
 struct Field {
-    enum Type { Text, Choice, Check, Slider, Action, Key, ReadOnly };
+    enum Type { Text, Choice, Check, Slider, Action, Key, Info };
     Type type;
     std::wstring label;
     std::wstring text;
@@ -66,6 +66,9 @@ struct Field {
     std::function<void(HWND)> onClick;
     bool capturing = false;
     int capturedKey = 0;
+    bool hasSeparateLabel() const {
+        return type != Check && type != Action && type != Info;
+    }
     std::wstring sliderText() const {
         return (sliderScale.minimum < 0 && selected > 0 ? L"+" : L"") + std::to_wstring(selected) + sliderSuffix;
     }

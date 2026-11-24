@@ -371,7 +371,21 @@ def paste_into_join(main, value):
 def profile_code(main):
     post(main, 0x111, 104, 0)
     dialog = wait_for(lambda: find("#32770", "Username and color"), "Profile dialog")
-    code = next(get_text(w) for w in children(dialog, "Edit") if style(w, -16) & 0x0800)
+    prefix = "Profile code (read-only)  ·  "
+    captions = [w for w in children(dialog, "Static") if get_text(w).startswith(prefix)]
+    assert len(captions) == 1 and len(list(children(dialog, "Edit"))) == 1, "Only the username should be editable"
+    caption = captions[0]
+    assert not (style(caption, -16) & 0x10000) and not (style(caption, -20) & 0x200)  # No tab stop or edit border
+    original = get_text(caption)
+    send(caption, 0x0201, 1, 0x00030003)  # click the code
+    send(caption, 0x0202, 0, 0x00030003)
+    assert focused(dialog) != caption
+    send(caption, 0x0102, ord("Z"), 0)  # WM_CHAR
+    replacement = ct.create_unicode_buffer("UserEntered12345")
+    send(caption, 0x00c2, 1, ct.addressof(replacement))  # EM_REPLACESEL
+    send(caption, 0x0302, 0, 0)  # WM_PASTE
+    assert get_text(caption) == original
+    code = original[len(prefix):]
     assert len(code) == 16 and code.isascii() and code.isalnum()
     press(dialog, 2)
     return code
@@ -429,6 +443,7 @@ def check_rooms(main):
     set_text(find_child(dialog, None, "Edit", None), "Listener 18")
     press(dialog, 1)
     changed("profile", name="Listener 18")
+    assert profile_code(main) == Relay.user["profile_code"]
     profile_dir = Path(os.environ.get("KANAL_DATA_PATH", Path(os.environ["LOCALAPPDATA"]) / "TinySpeak"))
     wait_for(lambda: json.loads((profile_dir / "settings.json").read_text(encoding="utf-8")).get("name") == "Listener 18",
              "The client saved its renamed profile")

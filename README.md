@@ -2,7 +2,7 @@
 
 TinySpeak is a portable voice and text chat app for small groups on 64-bit Windows. Your PC hosts the server while TinySpeak is open. You and your friends only need a username and an invite.
 
-**[Download Patch 18 for Windows x64 (ZIP)](https://github.com/LukaVola/TinySpeak/releases/download/patch-18/TinySpeak-Windows-x64.zip)**
+**[Download Patch 19 for Windows x64 (ZIP)](https://github.com/LukaVola/TinySpeak/releases/download/patch-19/TinySpeak-Windows-x64.zip)**
 
 ## Start a conversation
 
@@ -37,7 +37,7 @@ Each new server starts with **General** and **Lounge**. Open **Server settings**
 
 Drag the divider beside the room list to resize it. The arrow beside **Rooms** collapses it to a narrow rail. TinySpeak remembers the width and the collapsed state.
 
-**Server settings → Members** lists current and previous members by username and their last known public profile ID. **Export as TXT…** saves those two columns locally. The host keeps the roster with the saved server. Each launch generates a fresh read-only 16-character profile code. Reconnecting or restoring TinySpeak from the tray keeps the same code. A returning member updates the existing row and retains their personal playback settings.
+**Server settings → Members** lists current and previous members by username and their last known public profile ID. **Export as TXT…** saves those two columns locally. The host keeps the roster with the saved server. Each launch generates a fresh 16-character profile code. **Username and color** displays this code as plain text. Reconnecting or restoring TinySpeak from the tray keeps the same code. A returning member updates the existing row and retains their personal playback settings.
 
 Right-click your own name for **Change username…** and, during a call, **Leave voice room**. The small dot beside a member's profile color is green when they speak, red when their microphone is muted or you have muted them, and white when quiet.
 
