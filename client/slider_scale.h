@@ -6,6 +6,7 @@ struct SliderScale {
     int maximum;
     bool fivePercentSteps = false;
     int minimum = 0;
+    int step = 1;
 
     constexpr int trackMaximum() const {
         return position(maximum);
@@ -13,14 +14,14 @@ struct SliderScale {
 
     constexpr int position(int value) const {
         value = std::clamp(value, minimum, maximum);
-        if (!fivePercentSteps) return value - minimum;
+        if (!fivePercentSteps) return (value - minimum + step / 2) / step;
         if (value <= 5) return value;
         return 5 + (value - 5 + 2) / 5;
     }
 
     constexpr int value(int position) const {
         position = std::clamp(position, 0, trackMaximum());
-        if (!fivePercentSteps) return minimum + position;
+        if (!fivePercentSteps) return std::min(maximum, minimum + step * position);
         if (position <= 5) return position;
         return 5 + (position - 5) * 5;
     }

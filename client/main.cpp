@@ -36,12 +36,14 @@ const std::vector<std::wstring> colorNames{L"Red", L"Orange", L"Yellow", L"Lime"
 
 enum Control { ServerList = 100, NewServer, Join, Actions, Profile, Settings, Archive, Tree, Transcript, Message, Send,
     Invite, LeaveServer, DeleteServer, AddTextRoom, AddVoiceRoom, DeleteRoom, Kick, Export,
-    Mic, LeaveVoice, ParticipantVolume, MicSlider, OutputSlider, MuteParticipant, KickVoice, RenameRoom, LeaveText, InviteCode };
+    Mic, LeaveVoice, ParticipantVolume, MicSlider, OutputSlider, MuteParticipant, KickVoice, RenameRoom, LeaveText, InviteCode,
+    OpenChatFile, RestoreWindow, QuitApp };
 constexpr unsigned serverMenuBase = 1000;
 constexpr int maxMicrophoneGain = 150;
 constexpr int maxOutputGain = 110;
 constexpr UINT_PTR uiTimer = 1;
 constexpr UINT inviteReceived = WM_APP + 2;
+constexpr UINT trayEvent = WM_APP + 3;
 
 Json arrayOr(const Json& doc, const char* name) {
     auto it = doc.find(name);
@@ -79,16 +81,30 @@ Json loadJson(const fs::path& file) {
     return doc.is_discarded() ? Json::object() : doc;
 }
 
-bool writeText(const fs::path& file, const std::string& content, bool atomic = false) {
-    auto output = file;
-    if (atomic) output += L".tmp";
-    std::ofstream stream(output, std::ios::binary | std::ios::trunc);
+bool writeText(const fs::path& file, const std::string& content) {
+    std::ofstream stream(file, std::ios::binary | std::ios::trunc);
     stream.write(content.data(), static_cast<std::streamsize>(content.size()));
     stream.close();
-    return stream && (!atomic || MoveFileExW(output.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH));
+    return stream.good();
 }
 
-bool writeJson(const fs::path& file, const Json& doc) { return writeText(file, doc.dump(2), true); }
+bool writeJson(const fs::path& file, const Json& doc) {
+    auto temporary = file;
+    temporary += L".tmp";
+    const auto bytes = doc.dump(2);
+    HANDLE out = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (out == INVALID_HANDLE_VALUE) return false;
+    DWORD written = 0;
+    const bool complete = bytes.size() <= MAXDWORD && WriteFile(out, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr)
+        && written == bytes.size() && FlushFileBuffers(out);
+    CloseHandle(out);
+    return complete && MoveFileExW(temporary.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+}
+
+template<class T> auto savedValue(const Json& doc, const char* key, const T& fallback) -> decltype(doc.value(key, fallback)) {
+    try { return doc.value(key, fallback); }
+    catch (const Json::exception&) { return fallback; }
+}
 
 fs::path dataPath() {
     wchar_t value[32768];
@@ -166,7 +182,7 @@ public:
     void close();
 
 private:
-    HWND servers{}, tree{}, transcript{}, composer{}, newServer{}, join{}, actions{}, muteButton{}, micSlider{}, outputSlider{};
+    HWND servers{}, tree{}, transcript{}, composer{}, newServer{}, join{}, actions{}, muteButton{}, micSlider{}, outputSlider{}, exportChat{}, openChat{};
     HFONT regular{}, bold{}, heading{};
     HBRUSH background{}, fieldBrush{};
     HIMAGELIST icons{};
@@ -178,13 +194,17 @@ private:
     ChatSounds chatSounds;
     unsigned generation = 0, nextGeneration = 0, parkedGeneration = 0;
     std::uint64_t version = 0;
-    bool connected = false, registering = false, archiveChat = false, retainOwned = false, remember = true, rememberColor = true;
+    bool connected = false, registering = false, archiveChat = true, retainOwned = true, remember = true, rememberColor = true;
+    bool closeToTray = true, inTray = false;
+    UINT taskbarCreated = 0;
+    std::wstring hiddenDraft;
     bool rebuilding = false, closing = false;
     bool textClosed = false;
     bool directHosting = true, hostStarting = false, onHost = false, hostInternet = false, parkedRegistered = false;
     bool fivePercentSteps = true;
     EqualizerGains savedEqualizer{};
-    bool savedNormalization = false;
+    int savedNormalization = 0, savedThreshold = microphoneThresholdDefault;
+    ULONGLONG saveGainsAt = 0;
     int color = 0, pushKey = VK_F8, audioStatus = -1, displayedLevel = -1;
     bool pushWasDown = false, displayedTalk = false;
     ULONGLONG clockNext = 0, retryAt = 0, joinUntil = 0, nextRegistration = 0, probeAt = 0, guestOfflineSince = 0;
@@ -226,6 +246,13 @@ private:
     void statusText(std::wstring text);
     void load();
     void save();
+    void createView();
+    void destroyView();
+    bool addTrayIcon();
+    void removeTrayIcon();
+    void hideToTray();
+    void resumeView();
+    void trayMenu(POINT point);
     bool saveLayout(const Owned& item);
     void registerClient();
     void startNetwork(const std::wstring& endpoint);
@@ -266,7 +293,8 @@ private:
     void addRoom(bool text);
     Node selectedNode() const;
     void localLogs();
-    void exportLog(const std::string& text, const std::wstring& filename);
+    void openChatFile();
+    void exportLog(const fs::path& archive);
     void textSend();
     void voiceRequest(const std::string& code);
     void selectTree();
@@ -297,46 +325,45 @@ void App::load() {
             if (value >= -equalizerLimitDb && value <= equalizerLimitDb) savedEqualizer[i] = static_cast<std::int8_t>(value);
         }
     }
-    savedNormalization = doc.contains("normalize_playback") && doc["normalize_playback"] == true;
+    const int previousNormalization = savedValue(doc, "normalize_playback", false) ? 100 : 0;
+    savedNormalization = normalizationLevel(savedValue(doc, "normalization_percent", previousNormalization)) * normalizationStep;
     audio.equalizerDb = savedEqualizer;
-    audio.normalizePlayback = savedNormalization;
-    try {
-        name = doc.value("name", "");
-        if (name.empty()) name = "Guest" + randomCode(4);
-        address = wide(doc.value("address", utf8(localAddress)));
-        remember = doc.value("remember", true);
-        rememberColor = doc.value("remember_color", true);
-        color = rememberColor && doc.contains("color") ? std::clamp(doc.value("color", 0), 0, 15) :
-            static_cast<unsigned char>(randomCode(1).front()) % 16;
-        archiveChat = doc.value("local_chat", false);
-        retainOwned = doc.value("save_owned", false);
-        microphone = wide(doc.value("microphone", ""));
-        playback = wide(doc.value("playback", ""));
-        audio.mode = std::clamp(doc.value("audio_mode", 0), 0, 2);
-        audio.inputGain = std::clamp(doc.value("mic_gain", 100), 0, maxMicrophoneGain);
-        audio.outputGain = std::clamp(doc.value("output_gain", 100), 0, maxOutputGain);
-        fivePercentSteps = doc.value("five_percent_steps", true);
-        audio.threshold = std::clamp(doc.value("mic_threshold", microphoneThresholdDefault), 0, microphoneThresholdMax);
-        audio.bitrateKbps = validatedVoiceBitrate(doc.value("voice_bitrate_kbps", defaultVoiceBitrate));
-        pushKey = std::clamp(doc.value("ptt", VK_F8), VK_F6, VK_F12);
-        if (remember) {
-            for (const auto& bookmark : arrayOr(doc, "bookmarks")) {
-                auto code = bookmark.value("code", "");
-                if (validCode(code)) {
-                    bookmarks[code] = bookmark.value("name", "");
-                    auto invite = bookmark.value("invite", "");
-                    if (hostedInvite(invite) && invite.ends_with("." + code)) bookmarkInvites.emplace(code, std::move(invite));
-                }
-            }
+    audio.normalizationPercent = savedNormalization;
+    name = savedValue(doc, "name", "");
+    if (name.empty()) name = "Guest" + randomCode(4);
+    address = wide(savedValue(doc, "address", utf8(localAddress)));
+    remember = savedValue(doc, "remember", true);
+    rememberColor = savedValue(doc, "remember_color", true);
+    color = rememberColor && doc.contains("color") ? std::clamp(savedValue(doc, "color", 0), 0, 15) :
+        static_cast<unsigned char>(randomCode(1).front()) % 16;
+    archiveChat = savedValue(doc, "local_chat", true);
+    retainOwned = savedValue(doc, "save_owned", true);
+    closeToTray = savedValue(doc, "close_to_tray", true);
+    microphone = wide(savedValue(doc, "microphone", ""));
+    playback = wide(savedValue(doc, "playback", ""));
+    audio.mode = std::clamp(savedValue(doc, "audio_mode", 0), 0, 2);
+    audio.muted = savedValue(doc, "mic_muted", true);
+    audio.inputGain = std::clamp(savedValue(doc, "mic_gain", 100), 0, maxMicrophoneGain);
+    audio.outputGain = std::clamp(savedValue(doc, "output_gain", 100), 0, maxOutputGain);
+    fivePercentSteps = savedValue(doc, "five_percent_steps", true);
+    savedThreshold = std::clamp(savedValue(doc, "mic_threshold", microphoneThresholdDefault), 0, microphoneThresholdMax);
+    audio.threshold = savedThreshold;
+    audio.bitrateKbps = validatedVoiceBitrate(savedValue(doc, "voice_bitrate_kbps", defaultVoiceBitrate));
+    pushKey = std::clamp(savedValue(doc, "ptt", VK_F8), VK_F6, VK_F12);
+    if (remember) {
+        for (const auto& bookmark : arrayOr(doc, "bookmarks")) {
+            auto code = savedValue(bookmark, "code", "");
+            if (!validCode(code)) continue;
+            bookmarks[code] = savedValue(bookmark, "name", "");
+            auto invite = savedValue(bookmark, "invite", "");
+            if (hostedInvite(invite) && invite.ends_with("." + code)) bookmarkInvites.emplace(code, std::move(invite));
         }
-        if (retainOwned) {
-            for (const auto& item : arrayOr(doc, "owned")) {
-                auto code = item.value("code", ""), secret = item.value("secret", "");
-                if (validCode(code) && validCode(secret, 40)) owned.emplace(code, Owned{code, item.value("name", ""), secret, {}});
-            }
+    }
+    if (retainOwned) {
+        for (const auto& item : arrayOr(doc, "owned")) {
+            auto code = savedValue(item, "code", ""), secret = savedValue(item, "secret", "");
+            if (validCode(code) && validCode(secret, 40)) owned.emplace(code, Owned{code, savedValue(item, "name", ""), secret, {}});
         }
-    } catch (const Json::exception&) {
-        if (name.empty()) name = "Guest" + randomCode(4);
     }
     const auto voicePrefs = loadJson(directory / L"voice-preferences.json");
     if (voicePrefs.is_object()) {
@@ -389,8 +416,8 @@ void App::save() {
     Json doc{{"address", utf8(address)}, {"name", name}, {"remember", remember}, {"remember_color", rememberColor},
         {"local_chat", archiveChat}, {"save_owned", retainOwned}, {"microphone", utf8(microphone)},
         {"playback", utf8(playback)}, {"audio_mode", audio.mode.load()}, {"mic_gain", audio.inputGain.load()},
-        {"output_gain", audio.outputGain.load()}, {"mic_threshold", audio.threshold.load()},
-        {"playback_eq_db", savedEqualizer}, {"normalize_playback", savedNormalization},
+        {"output_gain", audio.outputGain.load()}, {"mic_threshold", savedThreshold}, {"mic_muted", audio.muted.load()},
+        {"playback_eq_db", savedEqualizer}, {"normalization_percent", savedNormalization}, {"close_to_tray", closeToTray},
         {"voice_bitrate_kbps", audio.bitrateKbps.load()}, {"five_percent_steps", fivePercentSteps}, {"ptt", pushKey}};
     if (rememberColor) doc["color"] = color;
     if (remember) {
@@ -404,12 +431,15 @@ void App::save() {
     }
     if (retainOwned) {
         auto& list = doc["owned"] = Json::array();
-        for (auto& [code, item] : owned) {
-            saveLayout(item);
+        for (const auto& [code, item] : owned) {
             list.push_back({{"code", code}, {"name", item.name}, {"secret", item.secret}});
         }
     }
-    if (!writeJson(directory / L"settings.json", doc)) statusText(L"Settings could not be saved on this computer.");
+    if (writeJson(directory / L"settings.json", doc)) saveGainsAt = 0;
+    else {
+        saveGainsAt = GetTickCount64() + 4000;
+        statusText(L"Settings could not be saved on this computer.");
+    }
 }
 
 void App::sendRequest(Json request) { if (network) network->send(std::move(request)); }
@@ -417,6 +447,7 @@ void App::sendRequest(Json request) { if (network) network->send(std::move(reque
 void App::statusText(std::wstring text) {
     if (status == text) return;
     status = std::move(text);
+    if (!tree || inTray) return;
     RECT rect{};
     GetClientRect(window, &rect);
     rect.top = rect.bottom - 26;
@@ -645,6 +676,7 @@ void App::catalog() {
 }
 
 void App::refreshServers() {
+    if (!tree || inTray) return;
     serverRows.clear();
     for (const auto& [code, item] : owned) serverRows.emplace_back(code, item.name);
     for (const auto& [code, title] : available) if (!owned.contains(code)) serverRows.emplace_back(code, title);
@@ -705,6 +737,7 @@ void App::applyState(const Json& data) {
 }
 
 void App::refreshTree() {
+    if (!tree || inTray) return;
     rebuilding = true;
     SendMessageW(tree, WM_SETREDRAW, FALSE, 0);
     TreeView_DeleteAllItems(tree);
@@ -755,6 +788,7 @@ void App::refreshTree() {
 }
 
 void App::refreshChat() {
+    if (!transcript || inTray) return;
     SendMessageW(transcript, WM_SETREDRAW, FALSE, 0);
     SendMessageW(transcript, EM_SETREADONLY, FALSE, 0);
     putText(transcript, L"");
@@ -768,7 +802,9 @@ void App::refreshChat() {
 }
 
 void App::refreshActions() {
+    if (!tree || inTray) return;
     const bool joined = !active().empty();
+    EnableWindow(exportChat, joined && !currentText.empty());
     EnableWindow(composer, joined && !currentText.empty());
     ShowWindow(transcript, joined && !currentText.empty() ? SW_SHOWNA : SW_HIDE);
     EnableWindow(newServer, directHosting ? !hostStarting && !joiningGuest : connected);
@@ -887,7 +923,7 @@ void App::appendChat(const Json& event) {
         messages.pop_front();
         trim = true;
     }
-    if (room != currentText) return;
+    if (!transcript || inTray || room != currentText) return;
     if (trim) {
         refreshChat();
     } else {
@@ -900,16 +936,25 @@ void App::appendChat(const Json& event) {
 
 void App::flushLogs() {
     while (!logs.empty()) {
-        auto [file, body] = std::move(logs.front());
+        const auto& [path, body] = logs.front();
+        HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        LARGE_INTEGER zero{}, start{};
+        bool saved = false;
+        if (file != INVALID_HANDLE_VALUE) {
+            if (SetFilePointerEx(file, zero, &start, FILE_END)) {
+                const auto marker = body.find('\0');
+                const auto record = start.QuadPart ? body.substr(marker + 1) : body.substr(0, marker) + body.substr(marker + 1);
+                DWORD written = 0;
+                saved = WriteFile(file, record.data(), static_cast<DWORD>(record.size()), &written, nullptr) && written == record.size();
+                if (!saved && SetFilePointerEx(file, start, nullptr, FILE_BEGIN)) SetEndOfFile(file);
+            }
+            CloseHandle(file);
+        }
+        if (!saved) {
+            statusText(L"Could not save the local chat log. TinySpeak will retry.");
+            break;
+        }
         logs.pop_front();
-        auto marker = body.find('\0');
-        std::error_code ec;
-        auto fresh = !fs::exists(file, ec);
-        std::ofstream writer(file, std::ios::binary | std::ios::app);
-        if (fresh) writer.write(body.data(), static_cast<std::streamsize>(marker));
-        writer.write(body.data() + marker + 1, static_cast<std::streamsize>(body.size() - marker - 1));
-        writer.close();
-        if (!writer) statusText(L"The local chat log could not be saved.");
     }
 }
 
@@ -962,8 +1007,11 @@ void App::onNetwork(NetworkResult result) {
             if (guest && !guestInvite.empty()) afterRegistration = guestInvite.substr(guestInvite.size() - 16);
             registerClient();
         }
-        if (op == "chat" && windowText(composer).empty() && request.value("code", "") == active() &&
-            request.value("room", "") == currentText) putText(composer, wide(request.value("text", "")));
+        if (op == "chat" && request.value("code", "") == active() && request.value("room", "") == currentText) {
+            const auto unsent = wide(request.value("text", ""));
+            if (inTray && hiddenDraft.empty()) hiddenDraft = unsent;
+            else if (composer && windowText(composer).empty()) putText(composer, unsent);
+        }
         return;
     }
     if (op == "register") {
@@ -1125,7 +1173,7 @@ void App::promptCreate() {
     });
     auto& item = owned.emplace(code, Owned{code, utf8(title), std::move(secret), std::move(rooms)}).first->second;
     if (!directHosting || (onHost && connected)) advertise(item);
-    if (retainOwned) save();
+    if (retainOwned) { saveLayout(item); save(); }
     refreshServers();
     requestJoin(code);
 }
@@ -1154,7 +1202,7 @@ void App::promptProfile() {
 
 void App::promptPlayback(HWND parent) {
     const auto original = audio.equalizerDb.load();
-    const bool originalNormalize = audio.normalizePlayback.load();
+    const int originalStrength = audio.normalizationPercent.load();
     constexpr std::array labels{L"1–200 Hz", L"201–400 Hz", L"401–1,000 Hz", L"1,001–20,000 Hz"};
     std::vector<Field> fields;
     for (std::size_t i = 0; i < labels.size(); ++i) {
@@ -1169,28 +1217,34 @@ void App::promptPlayback(HWND parent) {
         };
         fields.push_back(std::move(field));
     }
-    fields.push_back({Field::Check, L"Normalize incoming voice (limit sudden peaks)", L"", {}, originalNormalize});
-    fields.back().onChange = [this](int checked) { audio.normalizePlayback = checked != 0; };
+    fields.push_back({Field::Slider, L"Voice normalization strength (0% = off)", L"", {}, originalStrength});
+    fields.back().sliderScale = {100, false, 0, normalizationStep};
+    fields.back().sliderPageStep = 1;
+    fields.back().onChange = [this](int percent) { audio.normalizationPercent = percent; };
     if (!form(parent, L"Playback equalizer", fields)) {
         audio.equalizerDb = original;
-        audio.normalizePlayback = originalNormalize;
+        audio.normalizationPercent = originalStrength;
         return;
     }
     EqualizerGains gains{};
     for (std::size_t i = 0; i < gains.size(); ++i) gains[i] = static_cast<std::int8_t>(fields[i].selected);
     audio.equalizerDb = gains;
-    audio.normalizePlayback = fields.back().selected != 0;
+    audio.normalizationPercent = fields.back().selected;
 }
 
 void App::promptSettings() {
     enum SettingField { RelayAddress, InputDevice, OutputDevice, PlaybackEffectsField, InputMode, Threshold, TalkKey, Bitrate, FivePercentSteps,
-        RememberServers, RememberColor, ArchiveChat, RetainOwned };
+        RememberServers, RememberColor, ArchiveChat, RetainOwned, CloseToTray };
     auto [mics, speakers] = audio.devices();
     auto deviceField = [](const wchar_t* label, const std::vector<AudioDevice>& devices, const std::wstring& current) {
         Field field{Field::Choice, label, L"", {L"Default Windows device"}};
         for (const auto& device : devices) {
             field.choices.push_back(device.name);
             if (device.id == current) field.selected = static_cast<int>(field.choices.size()) - 1;
+        }
+        if (!current.empty() && field.selected == 0) {
+            field.selected = static_cast<int>(field.choices.size());
+            field.choices.push_back(L"Saved device (unavailable)");
         }
         return field;
     };
@@ -1215,6 +1269,7 @@ void App::promptSettings() {
         {Field::Check, L"Remember my color", L"", {}, rememberColor},
         {Field::Check, L"Save my chat logs on this computer", L"", {}, archiveChat},
         {Field::Check, L"Save my servers, rooms and chat logs", L"", {}, retainOwned},
+        {Field::Check, L"Keep TinySpeak in the system tray when I close the window", L"", {}, closeToTray},
     };
     fields[Threshold].sliderScale.maximum = microphoneThresholdMax;
     fields[RelayAddress].visible = !directHosting;
@@ -1224,21 +1279,23 @@ void App::promptSettings() {
     if (!form(window, L"Settings", fields)) {
         audio.threshold = originalThreshold;
         audio.equalizerDb = savedEqualizer;
-        audio.normalizePlayback = savedNormalization;
+        audio.normalizationPercent = savedNormalization;
         return;
     }
     savedEqualizer = audio.equalizerDb.load();
-    savedNormalization = audio.normalizePlayback.load();
-    audio.threshold = fields[Threshold].selected;
-    auto selectDevice = [](const std::vector<AudioDevice>& devices, int index) {
+    savedNormalization = audio.normalizationPercent.load();
+    savedThreshold = fields[Threshold].selected;
+    audio.threshold = savedThreshold;
+    auto selectDevice = [](const std::vector<AudioDevice>& devices, int index, const std::wstring& saved) {
+        if (index == 0) return std::wstring{};
         if (index > 0 && static_cast<std::size_t>(index) <= devices.size()) return devices[index - 1].id;
-        return std::wstring{};
+        return saved;
     };
     auto before = address;
     if (!directHosting) address = fields[RelayAddress].text;
     const auto prevMic = microphone, prevPlayback = playback;
-    microphone = selectDevice(mics, fields[InputDevice].selected);
-    playback = selectDevice(speakers, fields[OutputDevice].selected);
+    microphone = selectDevice(mics, fields[InputDevice].selected, prevMic);
+    playback = selectDevice(speakers, fields[OutputDevice].selected, prevPlayback);
     if (fields[InputMode].selected >= 0) audio.mode = fields[InputMode].selected;
     if (fields[TalkKey].selected >= 0) pushKey = VK_F6 + fields[TalkKey].selected;
     if (const int bitrate = fields[Bitrate].selected; bitrate >= 0 && static_cast<std::size_t>(bitrate) < voiceBitrates.size()) {
@@ -1251,8 +1308,10 @@ void App::promptSettings() {
     remember = fields[RememberServers].selected != 0;
     rememberColor = fields[RememberColor].selected != 0;
     archiveChat = fields[ArchiveChat].selected != 0;
+    closeToTray = fields[CloseToTray].selected != 0;
     const bool previousSave = retainOwned;
     retainOwned = fields[RetainOwned].selected != 0;
+    if (!previousSave && retainOwned) for (const auto& [_, item] : owned) saveLayout(item);
     if (previousSave && !retainOwned) {
         std::error_code ec;
         for (auto& [code, item] : owned) {
@@ -1310,10 +1369,11 @@ void App::popupActions() {
     const auto pick = showMenu(window, actions, {
         {Profile, L"Username and color…", directHosting || connected},
         {Settings, L"Settings…"},
-        {Archive, L"Local chat logs…"},
         {0, L"", false, true},
         {Send, L"Send message  ·  Enter", inChat && GetWindowTextLengthW(composer) > 0},
         {Export, L"Export chat as TXT…", inChat},
+        {OpenChatFile, L"Open chat TXT…"},
+        {Archive, L"Local chat logs…"},
         {Mic, audio.muted ? L"Unmute microphone" : L"Mute microphone"},
         {ParticipantVolume, L"Participant volume…", selected.kind == "user" && !voicePeer(selected.id).empty()},
         {LeaveVoice, L"Leave voice room", !state.value("voice", "").empty()},
@@ -1327,6 +1387,8 @@ void App::popupActions() {
         {DeleteRoom, L"Delete selected room…", canManage && (selected.kind == "text" || selected.kind == "voice")},
         {Kick, L"Remove selected user", canManage && selected.kind == "user" && selected.id != id},
         {DeleteServer, L"Delete server…", canManage},
+        {0, L"", false, true},
+        {QuitApp, L"Quit TinySpeak"},
     }, true);
     if (pick) command(static_cast<int>(pick), 0);
 }
@@ -1341,19 +1403,45 @@ void App::addRoom(bool text) {
     }
 }
 
-void App::exportLog(const std::string& text, const std::wstring& filename) {
-    wchar_t file[MAX_PATH]{};
-    wcsncpy_s(file, filename.c_str(), _TRUNCATE);
-    OPENFILENAMEW dialog{};
-    dialog.lStructSize = sizeof(dialog);
+void App::exportLog(const fs::path& archive) {
+    std::string text;
+    if (archive.empty()) {
+        text = "\xef\xbb\xbf";
+        if (auto found = chat.find(currentText); found != chat.end()) {
+            for (const auto& entry : found->second) text += entry.exportLine();
+        }
+    }
+    wchar_t file[32768] = L"TinySpeak-chat.txt";
+    OPENFILENAMEW dialog{sizeof(dialog)};
     dialog.hwndOwner = window;
     dialog.lpstrFilter = L"Text file (*.txt)\0*.txt\0\0";
     dialog.lpstrFile = file;
-    dialog.nMaxFile = MAX_PATH;
+    dialog.nMaxFile = ARRAYSIZE(file);
     dialog.lpstrDefExt = L"txt";
+    dialog.lpstrTitle = L"Export chat as TXT";
     dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    if (GetSaveFileNameW(&dialog)) {
-        statusText(writeText(file, "\xef\xbb\xbf" + text) ? L"TXT file saved." : L"The TXT file could not be saved.");
+    if (!GetSaveFileNameW(&dialog)) return;
+    bool saved;
+    if (archive.empty()) {
+        saved = writeText(file, text);
+    } else {
+        std::error_code ec;
+        saved = fs::equivalent(archive, file, ec) || CopyFileW(archive.c_str(), file, FALSE);
+    }
+    statusText(saved ? L"TXT file saved." : L"The TXT file could not be saved.");
+}
+
+void App::openChatFile() {
+    wchar_t file[32768]{};
+    OPENFILENAMEW dialog{sizeof(dialog)};
+    dialog.hwndOwner = window;
+    dialog.lpstrTitle = L"Open chat TXT";
+    dialog.lpstrFilter = L"Text file (*.txt)\0*.txt\0\0";
+    dialog.lpstrFile = file;
+    dialog.nMaxFile = ARRAYSIZE(file);
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (GetOpenFileNameW(&dialog) && !readChatLog(window, L"Saved chat", file)) {
+        statusText(L"The selected chat file could not be read.");
     }
 }
 
@@ -1388,34 +1476,10 @@ void App::localLogs() {
         }
         return;
     }
-    std::ifstream input(file, std::ios::binary);
-    if (!input) {
-        statusText(L"The log is unavailable.");
-        return;
-    }
     if (fields[1].selected == 1) {
-        wchar_t output[MAX_PATH] = L"TinySpeak-chat.txt";
-        OPENFILENAMEW dialog{sizeof(dialog)};
-        dialog.hwndOwner = window;
-        dialog.lpstrFilter = L"Text file (*.txt)\0*.txt\0\0";
-        dialog.lpstrFile = output;
-        dialog.nMaxFile = MAX_PATH;
-        dialog.lpstrDefExt = L"txt";
-        dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-        if (GetSaveFileNameW(&dialog)) {
-            std::error_code copyError;
-            if (file != fs::path(output)) fs::copy_file(file, output, fs::copy_options::overwrite_existing, copyError);
-            statusText(copyError ? L"The TXT file could not be saved." : L"TXT file saved.");
-        }
-    } else {
-        // The archive can grow on disk. Display its most recent 256 KiB at a time.
-        input.seekg(0, std::ios::end);
-        const auto size = static_cast<std::streamoff>(input.tellg());
-        const auto limit = std::streamoff{256 * 1024};
-        input.seekg(size > limit ? size - limit : std::streamoff{0}, std::ios::beg);
-        if (size > limit) input.ignore(limit, '\n');
-        const std::string text{std::istreambuf_iterator<char>(input), {}};
-        readOnlyWindow(window, L"Local chat log", wide(text));
+        exportLog(file);
+    } else if (!readChatLog(window, L"Local chat log", file, true)) {
+        statusText(L"The log is unavailable.");
     }
 }
 
@@ -1503,6 +1567,7 @@ void App::treeMenu(const Node& node, const POINT& screen) {
 }
 
 LRESULT App::onNotify(NMHDR* note) {
+    if (!tree || inTray || closing) return 0;
     if (note->code == NM_CUSTOMDRAW && (note->hwndFrom == micSlider || note->hwndFrom == outputSlider)) {
         return drawTrackbar(*reinterpret_cast<NMCUSTOMDRAW*>(note), theme::sidebar);
     }
@@ -1553,6 +1618,13 @@ void App::command(int which, int notification) {
     case Profile: promptProfile(); break;
     case Settings: promptSettings(); break;
     case Archive: localLogs(); break;
+    case OpenChatFile: openChatFile(); break;
+    case RestoreWindow:
+        resumeView();
+        ShowWindow(window, IsZoomed(window) ? SW_SHOWMAXIMIZED : SW_RESTORE);
+        SetForegroundWindow(window);
+        break;
+    case QuitApp: close(); break;
     case Send: textSend(); break;
     case Invite:
     case InviteCode:
@@ -1592,14 +1664,17 @@ void App::command(int which, int notification) {
         break;
     }
     case Export: {
-        std::string text;
-        auto found = chat.find(currentText);
-        if (found != chat.end()) for (const auto& entry : found->second) text += entry.exportLine();
-        exportLog(text, L"TinySpeak-chat.txt");
+        const auto code = active();
+        if (code.empty() || currentText.empty()) break;
+        flushLogs();
+        const auto archive = directory / L"logs" / wide(code + "-" + currentText + ".txt");
+        std::error_code ec;
+        exportLog((archiveChat || (retainOwned && owned.contains(code))) && fs::is_regular_file(archive, ec) ? archive : fs::path{});
         break;
     }
     case Mic:
         audio.muted = !audio.muted;
+        save();
         refreshActions();
         statusText(audio.muted ? L"Microphone muted." : L"Microphone unmuted.");
         break;
@@ -1629,7 +1704,7 @@ void App::statusAudio() {
         }
         if (current == 4) statusText(L"Listening only. No microphone is available.");
     }
-    if (level != displayedLevel || talking != displayedTalk) {
+    if (!inTray && (level != displayedLevel || talking != displayedTalk)) {
         displayedLevel = level;
         displayedTalk = talking;
         redrawAudioPanel();
@@ -1637,6 +1712,7 @@ void App::statusAudio() {
 }
 
 void App::redrawAudioPanel() {
+    if (!tree || inTray) return;
     RECT rect{};
     GetClientRect(window, &rect);
     rect.top = layoutFor(rect.right, rect.bottom, GetDpiForWindow(window)).footerTop;
@@ -1652,7 +1728,7 @@ void App::configureVolumeSliders() {
 void App::tick() {
     tickHelpers();
     chatSounds.tick(audio.outputGain.load());
-    const unsigned interval = currentVoice.empty() ? 250 : 35;
+    const unsigned interval = !currentVoice.empty() && (!inTray || audio.mode == 1) ? 35 : 250;
     if (interval != timerInterval) {
         timerInterval = interval;
         SetTimer(window, uiTimer, timerInterval, nullptr);
@@ -1664,6 +1740,7 @@ void App::tick() {
     }
     statusAudio();
     const auto now = GetTickCount64();
+    if (saveGainsAt && saveGainsAt <= now) save();
     if (retryAt && retryAt <= now) {
         retryAt = 0;
         if (!pendingJoin.empty()) sendRequest({{"op", "join"}, {"code", pendingJoin}});
@@ -1679,7 +1756,8 @@ void App::tick() {
 void App::close() {
     if (closing) return;
     closing = true;
-    audio.muted = true;
+    if (inTray) removeTrayIcon();
+    audio.permitted = false;
     audio.disconnect();
     flushLogs();
     save();
@@ -1753,9 +1831,7 @@ LRESULT CALLBACK transcriptProc(HWND control, UINT message, WPARAM wParam, LPARA
     return DefSubclassProc(control, message, wParam, lParam);
 }
 
-void App::setup() {
-    load();
-    darkFrame(window);
+void App::createView() {
     const int dpi = GetDpiForWindow(window);
     auto font = [&](int size, int weight) {
         return CreateFontW(-MulDiv(size, dpi, 72), 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
@@ -1776,6 +1852,8 @@ void App::setup() {
     newServer = button(L"New server", NewServer);
     join = button(L"Join", Join);
     actions = button(L"Menu", Actions);
+    exportChat = button(L"Export chat…", Export);
+    openChat = button(L"Open chat TXT…", OpenChatFile);
     tree = make(WC_TREEVIEWW, L"", WS_TABSTOP | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT |
         TVS_SHOWSELALWAYS | TVS_DISABLEDRAGDROP | TVS_NOHSCROLL, Tree);
     SetWindowTheme(tree, L"", L"");
@@ -1827,8 +1905,19 @@ void App::setup() {
     outputSlider = make(TRACKBAR_CLASSW, L"Output volume", TBS_NOTICKS | WS_TABSTOP, OutputSlider);
     configureVolumeSliders();
     refreshServers();
+    refreshTree();
+    refreshChat();
     refreshActions();
+    putText(composer, std::exchange(hiddenDraft, {}));
     arrange();
+}
+
+void App::setup() {
+    load();
+    darkFrame(window);
+    taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+    createView();
+    save();
     if (!directHosting) startNetwork(address);
     else {
         statusText(L"Create a server or enter an invite code.");
@@ -1840,6 +1929,70 @@ void App::setup() {
         statusText(L"Windows could not register invite links. Join with an invite code.");
     }
     SetTimer(window, uiTimer, timerInterval, nullptr);
+}
+
+void App::destroyView() {
+    rebuilding = true;
+    while (auto child = GetWindow(window, GW_CHILD)) DestroyWindow(child);
+    nodes.clear();
+    servers = tree = transcript = composer = newServer = join = actions = nullptr;
+    muteButton = micSlider = outputSlider = exportChat = openChat = nullptr;
+    if (icons) ImageList_Destroy(std::exchange(icons, nullptr));
+    for (auto font : {regular, bold, heading}) if (font) DeleteObject(font);
+    regular = bold = heading = nullptr;
+    if (background) DeleteObject(std::exchange(background, nullptr));
+    if (fieldBrush) DeleteObject(std::exchange(fieldBrush, nullptr));
+    rebuilding = false;
+}
+
+bool App::addTrayIcon() {
+    NOTIFYICONDATAW icon{sizeof(icon)};
+    icon.hWnd = window;
+    icon.uID = 1;
+    icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+    icon.uCallbackMessage = trayEvent;
+    icon.hIcon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(101));
+    wcscpy_s(icon.szTip, L"TinySpeak");
+    if (!Shell_NotifyIconW(NIM_ADD, &icon)) return false;
+    icon.uVersion = NOTIFYICON_VERSION_4;
+    Shell_NotifyIconW(NIM_SETVERSION, &icon);
+    return true;
+}
+
+void App::removeTrayIcon() {
+    NOTIFYICONDATAW icon{sizeof(icon)};
+    icon.hWnd = window;
+    icon.uID = 1;
+    Shell_NotifyIconW(NIM_DELETE, &icon);
+}
+
+void App::hideToTray() {
+    if (inTray || closing) return;
+    if (!addTrayIcon()) {
+        statusText(L"System tray unavailable. Use Menu → Quit TinySpeak to exit.");
+        return;
+    }
+    inTray = true;
+    hiddenDraft = windowText(composer);
+    ShowWindow(window, SW_HIDE);
+    destroyView();
+    flushLogs();
+    if (saveGainsAt) save();
+}
+
+void App::resumeView() {
+    if (!inTray || closing) return;
+    inTray = false;
+    removeTrayIcon();
+    createView();
+}
+
+void App::trayMenu(POINT point) {
+    if (point.x == -1 && point.y == -1) GetCursorPos(&point);
+    SetForegroundWindow(window);
+    const auto pick = showMenu(window, window, {{RestoreWindow, L"Open TinySpeak"}, {QuitApp, L"Quit TinySpeak"}}, false, &point);
+    PostMessageW(window, WM_NULL, 0, 0);
+    if (pick) command(static_cast<int>(pick), 0);
 }
 
 void App::arrange() {
@@ -1857,6 +2010,8 @@ void App::arrange() {
     place(join, layout.join);
     place(actions, layout.menu);
     place(tree, layout.rooms);
+    place(exportChat, layout.exportChat);
+    place(openChat, layout.openChat);
     place(transcript, layout.transcript);
     RECT edit = layout.composer;
     InflateRect(&edit, -MulDiv(10, dpi, 96), -MulDiv(8, dpi, 96));
@@ -1924,20 +2079,50 @@ LRESULT CALLBACK procedure(HWND window, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
     if (!app) return DefWindowProcW(window, msg, wParam, lParam);
+    if (app->taskbarCreated && msg == app->taskbarCreated && app->inTray) {
+        if (!app->addTrayIcon()) app->command(RestoreWindow, 0);
+        return 0;
+    }
     switch (msg) {
+    case WM_SYSCOMMAND:
+        if ((wParam & 0xfff0) == SC_RESTORE && app->inTray) {
+            app->command(RestoreWindow, 0);
+            return 0;
+        }
+        break;
+    case WM_SHOWWINDOW:
+        if (wParam) app->resumeView();
+        break;
+    case trayEvent:
+        switch (LOWORD(lParam)) {
+        case NIN_SELECT: case NIN_KEYSELECT: case WM_LBUTTONUP: app->command(RestoreWindow, 0); break;
+        case WM_CONTEXTMENU: app->trayMenu({GET_X_LPARAM(wParam), GET_Y_LPARAM(wParam)}); break;
+        case WM_RBUTTONUP: { POINT cursor{}; GetCursorPos(&cursor); app->trayMenu(cursor); break; }
+        }
+        return 0;
+    case WM_QUERYENDSESSION:
+        app->flushLogs();
+        app->save();
+        return TRUE;
+    case WM_ENDSESSION:
+        if (wParam) app->close();
+        return 0;
     case WM_SIZE: if (wParam != SIZE_MINIMIZED) app->arrange(); return 0;
     case WM_ERASEBKGND: return 1;
-    case WM_PAINT: app->paint(); return 0;
+    case WM_PAINT:
+        if (!app->tree || app->inTray) ValidateRect(window, nullptr);
+        else app->paint();
+        return 0;
     case WM_COMMAND: app->command(LOWORD(wParam), HIWORD(wParam)); return 0;
     case WM_NOTIFY: return app->onNotify(reinterpret_cast<NMHDR*>(lParam));
     case WM_TIMER: if (wParam == uiTimer) app->tick(); return 0;
-    case WM_CLOSE: app->close(); return 0;
+    case WM_CLOSE:
+        if (app->closeToTray) app->hideToTray();
+        else app->close();
+        return 0;
     case WM_DESTROY:
         KillTimer(window, uiTimer);
-        ImageList_Destroy(app->icons);
-        for (auto font : {app->regular, app->bold, app->heading}) DeleteObject(font);
-        DeleteObject(app->background);
-        DeleteObject(app->fieldBrush);
+        app->destroyView();
         PostQuitMessage(0);
         return 0;
     case WM_GETMINMAXINFO: {
@@ -1986,8 +2171,10 @@ LRESULT CALLBACK procedure(HWND window, UINT msg, WPARAM wParam, LPARAM lParam) 
         const int position = static_cast<int>(SendMessageW(slider, TBM_GETPOS, 0, 0));
         if (position != scale.position(gain.load())) {
             gain = scale.value(position);
+            app->saveGainsAt = GetTickCount64() + 350;
             app->redrawAudioPanel();
         }
+        if (app->saveGainsAt && LOWORD(wParam) != TB_THUMBTRACK) app->save();
         return 0;
     }
     case networkResult: {
@@ -2001,8 +2188,7 @@ LRESULT CALLBACK procedure(HWND window, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (!copy || !copy->lpData || app->closing || copy->dwData != 1 || copy->cbData < 16 || copy->cbData > 254) return FALSE;
         std::string code(static_cast<const char*>(copy->lpData), copy->cbData);
         if (!validCode(code) && !hostedInvite(code)) return FALSE;
-        ShowWindow(window, SW_RESTORE);
-        SetForegroundWindow(window);
+        app->command(RestoreWindow, 0);
         app->initialInvite = std::move(code);
         PostMessageW(window, inviteReceived, 0, 0);
         return TRUE;
@@ -2047,7 +2233,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             AllowSetForegroundWindow(pid);
             if (startup) { ReleaseMutex(startup); CloseHandle(startup); }
             if (code.empty()) {
-                ShowWindow(other, SW_RESTORE);
+                SendMessageTimeoutW(other, WM_SYSCOMMAND, SC_RESTORE, 0, SMTO_ABORTIFHUNG, 3000, nullptr);
                 SetForegroundWindow(other);
                 return 0;
             }

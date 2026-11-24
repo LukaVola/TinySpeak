@@ -9,6 +9,10 @@ inline constexpr int voiceSampleRate = 48000;
 inline constexpr int voiceBlockFrames = voiceSampleRate / 100;
 inline constexpr int maxParticipantGain = 150;
 inline constexpr int equalizerLimitDb = 12;
+inline constexpr int normalizationStep = 25;
+inline constexpr int normalizationLevel(int percent) {
+    return percent <= 0 ? 0 : percent >= 100 ? 4 : (percent + normalizationStep / 2) / normalizationStep;
+}
 using EqualizerGains = std::array<std::int8_t, 4>;
 
 inline std::string_view speakerSession(std::string_view identity) {

@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import winreg
@@ -95,6 +96,104 @@ def focused(window):
     return info.focus
 
 
+def children(window, cls):
+    previous = None
+    while handle := find_child(window, previous, cls, None):
+        yield handle
+        previous = handle
+
+
+def set_text(window, value):
+    data = ct.create_unicode_buffer(value)
+    assert send(window, 0x000C, 0, ct.addressof(data))
+
+
+def get_text(window):
+    size = send(window, 0x000E, 0, 0) + 1
+    data = ct.create_unicode_buffer(size)
+    send(window, 0x000D, size, ct.addressof(data))
+    return data.value
+
+
+def press(dialog, command):
+    post(dialog, 0x111, command, 0)
+    wait_for(lambda: not visible(dialog), "Dialog did not close")
+
+
+def set_slider(dialog, slider, position):
+    send(slider, 0x405, 1, position)  # TBM_SETPOS
+    send(dialog, 0x0114, 4, slider)  # WM_HSCROLL, TB_THUMBPOSITION
+
+
+def check_settings(main, change):
+    post(main, 0x111, 105, 0)
+    dialog = wait_for(lambda: find("#32770", "Settings"), "Settings dialog")
+    bitrate = None
+    target = ct.create_unicode_buffer("128 kbps")
+    for combo in children(dialog, "ComboBox"):
+        idx = send(combo, 0x0158, -1, ct.addressof(target))  # CB_FINDSTRINGEXACT
+        if idx >= 0:
+            bitrate = combo
+            break
+    assert bitrate
+    assert send(bitrate, 0x0158, -1, ct.addressof(ct.create_unicode_buffer("80 kbps"))) >= 0
+    if change:
+        send(bitrate, 0x014e, idx, 0)  # CB_SETCURSEL
+    else:
+        assert send(bitrate, 0x0147, 0, 0) == idx
+    for name in ["Save my chat logs on this computer", "Save my servers, rooms and chat logs",
+                 "Keep TinySpeak in the system tray when I close the window"]:
+        assert send(find_child(dialog, None, "Button", name), 0x00f0, 0, 0) == 1
+    button = find_child(dialog, None, "Button", "Playback equalizer and normalization…")
+    post(button, 0x00f5, 0, 0)
+    eq = wait_for(lambda: find("#32770", "Playback equalizer"), "EQ dialog")
+    tracks = list(children(eq, "msctls_trackbar32"))
+    assert len(tracks) == 5 and send(tracks[-1], 0x0402, 0, 0) == 4  # five strengths
+    if change:
+        set_slider(eq, tracks[1], 15)  # +3 dB
+        set_slider(eq, tracks[-1], 3)  # 75%
+    else:
+        assert send(tracks[1], 0x0400, 0, 0) == 15
+        assert send(tracks[-1], 0x0400, 0, 0) == 3
+    press(eq, 1)
+    press(dialog, 1)
+
+
+def choose_file(title, path):
+    dialog = wait_for(lambda: find("#32770", title), title)
+    def file_field():
+        combo = child(dialog, 0x047c)  # cmb13 on Explorer-style common dialogs
+        return (find_child(combo, None, "Edit", None) if combo else None) or child(dialog, 0x0480)
+    set_text(wait_for(file_field, "File name edit"), str(path))
+    press(dialog, 1)
+
+
+def check_files(main, root):
+    export, reopen = child(main, 118), child(main, 129)
+    assert export and reopen
+    path = root / "conversation.txt"
+    post(export, 0x00f5, 0, 0)
+    choose_file("Export chat as TXT", path)
+    wait_for(path.exists, "Chat export")
+    text = path.read_text(encoding="utf-8-sig")
+    assert "Speaker: Test message 0" in text and "Speaker: Test message 74" in text
+    post(reopen, 0x00f5, 0, 0)
+    choose_file("Open chat TXT", path)
+    viewer = wait_for(lambda: find("#32770", "Saved chat"), "Saved chat viewer")
+    assert "Speaker: Test message 74" in get_text(child(viewer, 501))
+    press(viewer, 1)
+    path.write_text("First ž\n" + "Čćć saved chat\r\n" * 24000 + "Last š", encoding="utf-8-sig")
+    post(reopen, 0x00f5, 0, 0)
+    choose_file("Open chat TXT", path)
+    viewer = wait_for(lambda: find("#32770", "Saved chat"), "Large chat viewer")
+    assert get_text(child(viewer, 501)).startswith("First ž")
+    send(viewer, 0x111, 503, 0)
+    assert get_text(child(viewer, 501)).endswith("Last š")
+    send(viewer, 0x111, 502, 0)
+    assert get_text(child(viewer, 501)).startswith("First ž")
+    press(viewer, 1)
+
+
 def paste_into_join(main, value):
     post(main, 0x111, 102, 0)  # WM_COMMAND, Join
     dialog = wait_for(lambda: find("#32770", "Join a server"), "Join dialog did not open")
@@ -132,7 +231,7 @@ def test(client):
     def close_window():
         handle = window()
         if handle:
-            post(handle, 0x0010, 0, 0)
+            post(handle, 0x111, 131, 0)  # Quit TinySpeak, including a tray session
             wait_for(lambda: not window(), "Test client did not close")
 
     codes = [f"RoomTest{i:08d}" for i in range(1, 4)]
@@ -141,16 +240,29 @@ def test(client):
     try:
         first = subprocess.Popen([client])
         wait_for(lambda: visible(window()), "First launch did not finish setting up its window")
+        profile = Path(os.environ["LOCALAPPDATA"]) / "TinySpeak" / "settings.json"
+        settings = json.loads(profile.read_text(encoding="utf-8"))
+        assert all(settings[k] for k in ("save_owned", "local_chat", "remember", "remember_color", "close_to_tray"))
         path = r"Software\Classes\tinyspeak"
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as key:
             assert winreg.QueryValueEx(key, "URL Protocol")[0] == ""
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path + r"\shell\open\command") as key:
             assert winreg.QueryValueEx(key, None)[0] == f'"{client}" --join-uri "%1"'
-        close_window()
+        main = window()
+        check_settings(main, True)
+        set_slider(main, child(main, 122), 28)  # 120%
+        set_slider(main, child(main, 123), 20)  # 80%
+        send(main, 0x111, 119, 0)  # unmute
+        settings = json.loads(profile.read_text(encoding="utf-8"))
+        assert (settings["mic_gain"], settings["output_gain"], settings["mic_muted"]) == (120, 80, False)
+        assert settings["normalization_percent"] == 75 and settings["voice_bitrate_kbps"] == 128
+        assert send(main, 0x0011, 0, 0) == 1  # WM_QUERYENDSESSION, followed by confirmed Windows shutdown
+        post(main, 0x0016, 1, 0)
         assert first.wait(15) == 0
         assert open_url(None, "open", prefix + codes[0], None, None, 1) > 32
         wait_for(lambda: Relay.joined == codes[:1], "Cold link did not join its server")
         main = wait_for(window, "Cold link did not open TinySpeak")
+        check_settings(main, False)
         pid = wt.DWORD()
         window_thread(main, ct.byref(pid))
         assert open_url(None, "open", prefix + codes[1], None, None, 1) > 32
@@ -162,6 +274,14 @@ def test(client):
         paste_into_join(main, codes[2])
         wait_for(lambda: len(Relay.joined) >= 3, "Manual invite code did not join")
         inspect_history(main)
+        with tempfile.TemporaryDirectory() as folder:
+            check_files(main, Path(folder))
+        if find("Shell_TrayWnd", None):
+            post(main, 0x0010, 0, 0)
+            wait_for(lambda: not visible(main) and not child(main, 108), "Close did not unload the view into the tray")
+            subprocess.run([client.parent / "Launch TinySpeak.exe"], timeout=10, check=True)
+            wait_for(lambda: visible(main) and child(main, 108), "Shortcut did not restore the tray session")
+            assert get_text(child(main, 109)) == "x" and "Test message 74" in get_text(child(main, 108))
         assert Relay.joined == codes, "The Join box also accepted the URL"
         assert subprocess.run([client, "--join-uri", prefix + codes[0] + "?unexpected"], timeout=10).returncode == 2
     finally:

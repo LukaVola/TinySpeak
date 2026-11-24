@@ -23,13 +23,14 @@ public:
     PlaybackEffects& operator=(const PlaybackEffects&) = delete;
 
     void render(std::span<const int> mix, std::int16_t* output, int volume,
-        EqualizerGains target, bool normalize) {
+        EqualizerGains target, int normalizationPercent) {
         assert(mix.size() <= voiceBlockFrames);
         if (mix.empty()) return;
         if (applied_ != target) updateBands(target);
-        if (!normalize && normalized_) limiter_ = {};
-        normalized_ = normalize;
-        if (applied_ == EqualizerGains{} && !normalize) {
+        const int strength = normalizationLevel(normalizationPercent);
+        if (!strength && normalized_) limiter_ = {};
+        normalized_ = strength != 0;
+        if (applied_ == EqualizerGains{} && !strength) {
             for (std::size_t i = 0; i < mix.size(); ++i) {
                 output[i] = static_cast<std::int16_t>(std::clamp(mix[i] * volume / 100, -32768, 32767));
             }
@@ -47,7 +48,7 @@ public:
                 ma_biquad_clear_cache(band);
             }
         }
-        if (normalize) limiter_.process({work_.data(), mix.size()});
+        if (strength) limiter_.process({work_.data(), mix.size()}, strength);
         const float master = static_cast<float>(volume) / 100;
         for (std::size_t i = 0; i < mix.size(); ++i) {
             output[i] = static_cast<std::int16_t>(std::clamp(work_[i] * master, -32768.f, 32767.f));
@@ -59,10 +60,12 @@ private:
         float speechPeak = 4096.f;
         float gain = 1.f;
 
-        void process(std::span<float> samples) {
-            // About 6 dB of headroom above recent speech peaks and an absolute
-            // -3 dBFS ceiling. Attack on this very sample, release in ~80 ms.
-            const float ceiling = std::min(23200.f, 2.f * speechPeak);
+        void process(std::span<float> samples, int strength) {
+            // Allow about 18, 14, 10 or 6 dB above recent speech peaks.
+            // The strongest level keeps the original limiter's -3 dBFS ceiling.
+            constexpr std::array headroom{8.f, 5.f, 3.16f, 2.f};
+            constexpr std::array absolutePeak{32767.f, 30935.f, 27570.f, 23200.f};
+            const float ceiling = std::min(absolutePeak[strength - 1], headroom[strength - 1] * speechPeak);
             float blockPeak = 0;
             for (auto& sample : samples) {
                 const float peak = std::abs(sample);

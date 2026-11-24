@@ -46,7 +46,9 @@ try {
     }
     assert.ok(acknowledged,'Missing chat response from the other network');
     console.log('Chat round trip through the independent host passed');
-    const audio=spawn(resolve(probePath),[a.url,a.token,b.token,'32',b.url,...b.turn,...a.turn],
+    const bitrate=returnInviteFile ? '80' : '128';
+    console.log('Testing outgoing Opus target at '+bitrate+' kbps');
+    const audio=spawn(resolve(probePath),[a.url,a.token,b.token,bitrate,b.url,...b.turn,...a.turn],
         {cwd:folder,stdio:'inherit',windowsHide:true});
     try {
         const [status]=await once(audio,'exit',{signal:AbortSignal.timeout(65000)});

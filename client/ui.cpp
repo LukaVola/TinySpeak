@@ -1,11 +1,13 @@
 #include "ui.h"
 #include "mic_icon.h"
 #include "palette.h"
+#include "network.h"
 
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
 #include <algorithm>
+#include <fstream>
 #include <utility>
 
 std::wstring windowText(HWND window) {
@@ -249,10 +251,48 @@ struct EmptyDialog {
     }
 };
 
+struct LogPages {
+    static constexpr std::streamoff pageSize = 256 * 1024;
+    std::ifstream file;
+    std::streamoff length, current = 0;
+    bool failed = false;
+
+    explicit LogPages(const std::filesystem::path& path) : file(path, std::ios::binary | std::ios::ate), length(file.tellg()) {}
+    std::streamoff last() const { return length > 0 ? (length - 1) / pageSize : 0; }
+    std::streamoff boundary(std::streamoff page) {
+        if (!page) return 0;
+        if (page > last()) return length;
+        const auto edge = page * pageSize;
+        // Prefer complete chat lines, even for long messages. Never split a UTF-8 character.
+        constexpr int lookBack = 16384;
+        file.seekg(edge - lookBack);
+        std::string tail(lookBack, '\0');
+        file.read(tail.data(), lookBack);
+        if (auto nl = tail.rfind('\n'); nl != std::string::npos) return edge - lookBack + static_cast<std::streamoff>(nl) + 1;
+        auto start = edge;
+        while (start < length && (file.peek() & 0xc0) == 0x80) { file.get(); ++start; }
+        return start;
+    }
+    void display(HWND window) {
+        file.clear();
+        const auto start = boundary(current), end = boundary(current + 1);
+        std::string bytes(static_cast<std::size_t>(end - start), '\0');
+        file.seekg(start);
+        file.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        if (!file) { failed = true; EndDialog(window, IDCANCEL); return; }
+        if (!current && bytes.starts_with("\xef\xbb\xbf")) bytes.erase(0, 3);
+        auto edit = GetDlgItem(window, 501);
+        putText(edit, wide(bytes));
+        SendMessageW(edit, EM_SETSEL, 0, 0);
+        EnableWindow(GetDlgItem(window, 502), current > 0);
+        EnableWindow(GetDlgItem(window, 503), current < last());
+    }
+};
+
 struct Form {
     const wchar_t* title;
     std::vector<Field>* fields;
-    const std::wstring* body;
+    LogPages* log;
     FormBrushes brushes;
 
     static INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -323,6 +363,12 @@ struct Form {
                 return TRUE;
             }
         }
+        if (self && self->log && message == WM_COMMAND && (LOWORD(wParam) == 502 || LOWORD(wParam) == 503)) {
+            auto& pages = *self->log;
+            pages.current = std::clamp<std::streamoff>(pages.current + (LOWORD(wParam) == 502 ? -1 : 1), 0, pages.last());
+            pages.display(window);
+            return TRUE;
+        }
         if (message == WM_CLOSE || (message == WM_COMMAND && LOWORD(wParam) == IDCANCEL)) {
             EndDialog(window, IDCANCEL);
             return TRUE;
@@ -370,11 +416,17 @@ struct Form {
         const int x = unit.right * 3, y = unit.bottom, button = unit.right * 21;
         const int height = y * 3 / 2 + 2;
         int row = y;
-        if (body) {
-            auto text = control(window, L"EDIT", body->c_str(), WS_TABSTOP | ES_READONLY | ES_MULTILINE |
+        if (log) {
+            auto text = control(window, L"EDIT", L"", WS_TABSTOP | ES_READONLY | ES_MULTILINE |
                 ES_AUTOVSCROLL | WS_VSCROLL, 501, WS_EX_CLIENTEDGE);
             MoveWindow(text, x, y, bounds.right - x * 2, bounds.bottom - y * 5, TRUE);
-            SendMessageW(text, EM_SETSEL, 0, 0);
+            if (log->last()) {
+                auto previous = control(window, L"BUTTON", L"Previous page", WS_TABSTOP | BS_OWNERDRAW, 502);
+                auto next = control(window, L"BUTTON", L"Next page", WS_TABSTOP | BS_OWNERDRAW, 503);
+                MoveWindow(previous, x, bounds.bottom - y * 3, button, height, TRUE);
+                MoveWindow(next, x * 2 + button, bounds.bottom - y * 3, button, height, TRUE);
+            }
+            log->display(window);
         } else {
             for (auto& f : *fields) {
                 if (!f.visible) continue;
@@ -414,10 +466,10 @@ struct Form {
                 row += height + y / 3;
             }
         }
-        auto okay = control(window, L"BUTTON", body ? L"Close" : L"OK", WS_TABSTOP | BS_OWNERDRAW, IDOK);
+        auto okay = control(window, L"BUTTON", log ? L"Close" : L"OK", WS_TABSTOP | BS_OWNERDRAW, IDOK);
         MoveWindow(okay, bounds.right - x - button, bounds.bottom - y * 3, button, height, TRUE);
         SendMessageW(window, DM_SETDEFID, IDOK, 0);
-        if (!body) {
+        if (!log) {
             auto cancel = control(window, L"BUTTON", L"Cancel", WS_TABSTOP | BS_OWNERDRAW, IDCANCEL);
             MoveWindow(cancel, bounds.right - x * 2 - button * 2, bounds.bottom - y * 3, button, height, TRUE);
             const auto first = std::find_if(fields->begin(), fields->end(), [](const Field& f) { return f.visible; });
@@ -441,9 +493,13 @@ bool form(HWND owner, const wchar_t* title, std::vector<Field>& fields) {
         reinterpret_cast<LPARAM>(&data)) == IDOK;
 }
 
-void readOnlyWindow(HWND owner, const wchar_t* title, const std::wstring& body) {
+bool readChatLog(HWND owner, const wchar_t* title, const std::filesystem::path& file, bool startAtEnd) {
+    LogPages pages(file);
+    if (pages.length < 0) return false;
+    if (startAtEnd) pages.current = pages.last();
     EmptyDialog layout(350, 230);
-    Form data{title, nullptr, &body};
-    DialogBoxIndirectParamW(GetModuleHandleW(nullptr), &layout.dialog, owner, Form::procedure,
+    Form data{title, nullptr, &pages};
+    const auto result = DialogBoxIndirectParamW(GetModuleHandleW(nullptr), &layout.dialog, owner, Form::procedure,
         reinterpret_cast<LPARAM>(&data));
+    return result != -1 && !pages.failed;
 }

@@ -4,7 +4,7 @@
 #include <algorithm>
 
 struct Layout {
-    RECT brand, server, create, join, menu, listTitle, rooms, chatTitle, transcript, composer,
+    RECT brand, server, create, join, menu, listTitle, rooms, chatTitle, exportChat, openChat, transcript, composer,
         mute, microphone, input, meter, outputTitle, output, voice, status;
     int toolbarBottom, sidebarRight, footerTop, statusTop;
 };
@@ -26,7 +26,8 @@ inline Layout layoutFor(int width, int height, int dpi) {
     const int controlsTop = narrow ? dip(54) : dip(13);
     const int header = narrow ? dip(98) : dip(60);
     const int sidebar = std::clamp(width * 28 / 100, dip(148), dip(248));
-    const int workTop = header + dip(44), status = height - dip(26), footer = status - dip(58);
+    const int logLeft = width - margin - dip(118);
+    const int workTop = header + dip(56), status = height - dip(26), footer = status - dip(58);
     const int composeBottom = std::max(workTop, footer - dip(12)), composeTop = std::max(workTop, composeBottom - dip(37));
     const int center = width / 2;
     const int firstSlider = margin + dip(154), secondSlider = center + dip(110);
@@ -40,7 +41,9 @@ inline Layout layoutFor(int width, int height, int dpi) {
         box(menuLeft, dip(13), menuRight, dip(13) + button),
         box(margin, header + dip(6), sidebar - margin, workTop),
         box(dip(6), workTop, sidebar - dip(7), footer - dip(8)),
-        box(sidebar + margin, header + dip(6), width - margin, workTop),
+        box(sidebar + margin, header + dip(6), logLeft - gap, workTop),
+        box(logLeft, header + dip(3), width - margin, header + dip(26)),
+        box(logLeft, header + dip(29), width - margin, header + dip(52)),
         box(sidebar + margin, workTop + dip(2), width - margin, composeTop - dip(8)),
         box(sidebar + margin, composeTop, width - margin, composeBottom),
         box(margin, footer + dip(10), margin + dip(22), footer + dip(32)),

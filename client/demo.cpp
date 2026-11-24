@@ -5,7 +5,7 @@
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR arguments, int show) {
     if (!arguments || !*arguments) {
         if (HWND existing = FindWindowW(L"TinySpeak.Desktop", nullptr)) {
-            ShowWindow(existing, SW_RESTORE);
+            SendMessageTimeoutW(existing, WM_SYSCOMMAND, SC_RESTORE, 0, SMTO_ABORTIFHUNG, 3000, nullptr);
             SetForegroundWindow(existing);
             return 0;
         }

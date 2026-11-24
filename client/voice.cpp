@@ -154,7 +154,7 @@ struct Connection final : livekit::RoomDelegate {
     void mix(std::int16_t* output, ma_uint32 frames) {
         const int volume = owner.outputGain.load();
         const auto equalizer = owner.equalizerDb.load(std::memory_order_relaxed);
-        const bool normalize = owner.normalizePlayback.load(std::memory_order_relaxed);
+        const int normalization = owner.normalizationPercent.load(std::memory_order_relaxed);
         const auto participantVolumes = gains.load();
         std::unique_lock lock(peersMutex, std::try_to_lock);
         while (frames) {
@@ -172,7 +172,7 @@ struct Connection final : livekit::RoomDelegate {
                     mixVoiceSamples(sum.data(), samples.data(), count, gain);
                 }
             }
-            playbackEffects.render({sum.data(), n}, output, volume, equalizer, normalize);
+            playbackEffects.render({sum.data(), n}, output, volume, equalizer, normalization);
             reference.write(output, n);
             frames -= n;
             output += n;

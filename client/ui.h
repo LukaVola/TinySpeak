@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <functional>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -55,4 +56,4 @@ struct Field {
 };
 
 bool form(HWND owner, const wchar_t* title, std::vector<Field>& fields);
-void readOnlyWindow(HWND owner, const wchar_t* title, const std::wstring& body);
+bool readChatLog(HWND owner, const wchar_t* title, const std::filesystem::path& file, bool startAtEnd = false);

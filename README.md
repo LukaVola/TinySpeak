@@ -2,7 +2,7 @@
 
 TinySpeak is a portable voice and text chat app for small groups on 64-bit Windows. Your PC hosts the server while TinySpeak is open. You and your friends only need a username and an invite.
 
-**[Download Patch 14 for Windows x64 (ZIP)](https://github.com/LukaVola/TinySpeak/releases/download/patch-14/TinySpeak-Windows-x64.zip)**
+**[Download Patch 15 for Windows x64 (ZIP)](https://github.com/LukaVola/TinySpeak/releases/download/patch-15/TinySpeak-Windows-x64.zip)**
 
 ## Start a conversation
 
@@ -25,17 +25,19 @@ The full Internet invite starts with **TS2-** and contains the information neede
 - **5% volume steps (1% from 0% to 5%)** is on by default. It applies to the microphone, app output and participant volume. The microphone is capped at 150% and the app output at 110%. Turn this option off for 1% steps across the full range.
 - Right-click a person in your voice room to **Mute for me**, **Unmute for me**, or adjust **Participant volume** from **0% to 150%**. The volume slider previews the change, **OK** saves it, and **Cancel** restores the previous level. Unmuting restores the saved level.
 - Open **Menu → Settings → Playback equalizer and normalization…** to adjust four incoming voice bands from **−12 to +12 dB**. The bands cover 1–200 Hz, 201–400 Hz, 401–1,000 Hz and 1,001–20,000 Hz. All four start at 0 dB.
-- **Normalize incoming voice (limit sudden peaks)** softens sudden sounds such as a microphone knock and gradually restores the listening level. It starts off. Both settings preview during the call and save locally when you confirm both dialogs.
+- **Voice normalization strength** limits sudden sounds such as a microphone knock. Choose 0% (off), 25%, 50%, 75% or 100%. Higher settings allow smaller peaks above the recent speech level. A new profile starts at 0%. An existing enabled limiter becomes 100%. The EQ and strength preview live and are saved when you confirm both dialogs.
 - Saved levels apply only to your playback. TinySpeak remembers the person across reconnects and username changes when both clients and the relay are on Patch 3 or later. For older clients, TinySpeak uses the name within the current server.
 - Choose the input device, output device and microphone mode in **Menu → Settings**. The default push-to-talk key is **F8**.
 - **Microphone threshold** suppresses microphone audio below the chosen level in any microphone mode. **30 dB** is the default, **70 dB** is the maximum, and **0 dB** turns the gate off. The setting uses a digital signal scale starting at −70 dBFS. A setting of 30 dB corresponds to −40 dBFS RMS. **OK** saves the setting locally.
-- **Microphone bitrate** selects a target of **24, 32, 48, or 64 kbps** for your outgoing Opus audio. The default is **32 kbps - normal quality**. Changing it during a call briefly reconnects your audio in the same room.
+- **Microphone bitrate** selects a target of **24, 32, 48, 64, 80 or 128 kbps** for your outgoing Opus audio. The default is **32 kbps - normal quality**. Changing it during a call briefly reconnects your audio in the same room.
 
 ## Servers, invites and logs
 
 Right-click your voice room or open text channel to leave it. Owners can also rename rooms and channels, and remove someone from a voice room while keeping them on the server.
 
-Owners can save servers, room layouts and chat logs locally. Guests can save their own logs, then open, export or delete them under **Menu → Local chat logs**. The chat view groups messages by day, and the TXT export keeps full timestamps.
+A new installation saves owned servers, room layouts, bookmarks and local chat logs by default. Existing profiles keep their choices. Only messages received by that computer are archived. **Export chat…** saves the channel’s local log as a UTF-8 TXT file, or the current chat view when logging is off. **Open chat TXT…** directly below it opens a saved file, even when disconnected. Large logs have **Previous page** and **Next page** buttons. **Menu → Local chat logs** also lets you read, export or delete automatic archives.
+
+Closing the window keeps TinySpeak in the Windows system tray by default. Calls, hosting and local logging continue while the window controls are unloaded. Click the microphone tray icon or open the desktop shortcut to return. Right-click the icon and choose **Quit TinySpeak** for a full exit. You can also quit from **Menu** or disable close-to-tray in **Settings**.
 
 Direct hosting uses the existing `%LOCALAPPDATA%\TinySpeak\LokalnaProba` profile. Personal playback levels and mutes are stored in `voice-preferences.json`. The profile also stores the host identity used to authenticate invitations.
 

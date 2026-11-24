@@ -27,7 +27,7 @@ double responseDb(EqualizerGains gains, double frequency) {
             const double t = (block * voiceBlockFrames + i) / double(voiceSampleRate);
             mix[i] = static_cast<int>(3600 * std::sin(2 * std::numbers::pi * frequency * t));
         }
-        effects.render(mix, out.data(), 100, gains, false);
+        effects.render(mix, out.data(), 100, gains, 0);
         if (block < 40) continue;
         for (int i = 0; i < voiceBlockFrames; ++i) {
             inputPower += double(mix[i]) * mix[i];
@@ -53,7 +53,7 @@ int main() {
     mixVoiceSamples(mix.data(), samples.data(), mix.size(), 0);
     PlaybackEffects effects;
     for (int volume : {0, 3, 100, 110}) {
-        effects.render(mix, out.data(), volume, {}, false);
+        effects.render(mix, out.data(), volume, {}, 0);
         for (int i = 0; i < voiceBlockFrames; ++i) {
             assert(mix[i] == samples[i] * 150 / 100);
             assert(out[i] == std::clamp(mix[i] * volume / 100, -32768, 32767));
@@ -72,25 +72,40 @@ int main() {
 
     // A repeatable voice-level tone, followed by one first-sample microphone knock.
     for (int i = 0; i < voiceBlockFrames; ++i) mix[i] = static_cast<int>(1000 * std::cos(2 * std::numbers::pi * i / 48));
-    for (int n = 0; n < 500; ++n) effects.render(mix, out.data(), 100, {}, true);
+    for (int n = 0; n < 500; ++n) effects.render(mix, out.data(), 100, {}, 100);
     assert(out[0] == 1000);
     for (int incoming : {32000, -32000}) {
         mix[0] = incoming;
-        effects.render(mix, out.data(), 100, {}, true);
+        effects.render(mix, out.data(), 100, {}, 100);
         std::printf("Voice peak 1000, incoming knock %d, protected peak %d\n", incoming, out[0]);
         assert(std::abs(out[0]) <= 2150 && std::abs(out[0]) >= 1900);
         mix[0] = 1000;
-        for (int n = 0; n < 60; ++n) effects.render(mix, out.data(), 100, {}, true);
+        for (int n = 0; n < 60; ++n) effects.render(mix, out.data(), 100, {}, 100);
         assert(out[0] >= 995);
     }
+    int previous = 32001;
+    constexpr SliderScale strengthScale{100, false, 0, normalizationStep};
+    for (int strength : {0, 25, 50, 75, 100}) {
+        assert(strengthScale.value(strengthScale.position(strength)) == strength);
+        PlaybackEffects level;
+        mix[0] = 1000;
+        for (int n = 0; n < 500; ++n) level.render(mix, out.data(), 100, {}, strength);
+        assert(out[0] == 1000);
+        mix[0] = 32000;
+        level.render(mix, out.data(), 100, {}, strength);
+        std::printf("Normalization %d%%: knock %d\n", strength, out[0]);
+        assert(out[0] < previous && (strength || out[0] == 32000));
+        previous = out[0];
+    }
+    mix[0] = 1000;
     for (int i = 0; i < voiceBlockFrames; ++i) mix[i] *= 700;
     for (int n = 0; n < 200; ++n) {
-        effects.render(mix, out.data(), 110, {12, -12, 12, 12}, true);
+        effects.render(mix, out.data(), 110, {12, -12, 12, 12}, 100);
         for (auto sample : out) assert(std::abs(sample) <= 25521);
     }
-    effects.render(mix, out.data(), 0, {12, -12, 12, 12}, true);
+    effects.render(mix, out.data(), 0, {12, -12, 12, 12}, 100);
     for (auto sample : out) assert(sample == 0);
-    for (int n = 0; n < 12; ++n) effects.render(mix, out.data(), 100, {}, false);
+    for (int n = 0; n < 12; ++n) effects.render(mix, out.data(), 100, {}, 0);
     for (int i = 0; i < voiceBlockFrames; ++i) assert(out[i] == std::clamp(mix[i], -32768, 32767));
     std::puts("Passed participant gain, bypass, four EQ bands, first-sample limiting, recovery and mute.");
 }
