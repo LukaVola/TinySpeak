@@ -2,7 +2,7 @@
 
 TinySpeak is a portable voice and text chat app for small groups on 64-bit Windows. Your PC hosts the server while TinySpeak is open. You and your friends only need a username and an invite.
 
-**[Download Patch 17 for Windows x64 (ZIP)](https://github.com/LukaVola/TinySpeak/releases/download/patch-17/TinySpeak-Windows-x64.zip)**
+**[Download Patch 18 for Windows x64 (ZIP)](https://github.com/LukaVola/TinySpeak/releases/download/patch-18/TinySpeak-Windows-x64.zip)**
 
 ## Start a conversation
 
@@ -33,9 +33,13 @@ The full Internet invite starts with **TS2-** and contains the information neede
 
 ## Servers, invites and logs
 
-Each new server starts with **General** and **Lounge**. Right-click a text or voice room to leave it. Owners can create another room of the same type, rename it, or choose **Set room limit…** (1–16 people). New rooms start at 16. Older text rooms keep their existing capacity until the owner sets a limit. Lowering a limit requires enough people to leave first. Voice and text use separate seats.
+Each new server starts with **General** and **Lounge**. Open **Server settings** to see the rooms. The owner can rename the server, create, rename or delete rooms, and set a voice room limit from **1 to 16**. A voice room with fewer than 16 places shows its limit in gray at the right of its name. Text rooms are open to everyone in the server, including rooms saved by Patch 17. The room context menus and the main **Menu** also provide management commands.
 
-The small dot beside a member's profile color is green when they speak, red when their microphone is muted or you have muted them, and white when quiet. The **Offline** group starts collapsed and lists remembered members who are away from this server. Open **Menu → Username and color** for your permanent 16-character profile code, or right-click a member to copy theirs. The host remembers members locally with the saved server.
+Drag the divider beside the room list to resize it. The arrow beside **Rooms** collapses it to a narrow rail. TinySpeak remembers the width and the collapsed state.
+
+**Server settings → Members** lists current and previous members by username and their last known public profile ID. **Export as TXT…** saves those two columns locally. The host keeps the roster with the saved server. Each launch generates a fresh read-only 16-character profile code. Reconnecting or restoring TinySpeak from the tray keeps the same code. A returning member updates the existing row and retains their personal playback settings.
+
+Right-click your own name for **Change username…** and, during a call, **Leave voice room**. The small dot beside a member's profile color is green when they speak, red when their microphone is muted or you have muted them, and white when quiet.
 
 A new installation saves owned servers, room layouts, bookmarks and local chat logs by default. Existing profiles keep their choices. Only messages received by that computer are archived. Under **Menu → Chat logs**, **Export chat as TXT…** saves the channel’s local log as a UTF-8 TXT file, or the current chat view when logging is off. **Open chat TXT…** directly below it opens a saved file, even when disconnected. Large logs have **Previous page** and **Next page** buttons. **Local chat logs…** in the same submenu also lets you read, export or delete automatic archives.
 

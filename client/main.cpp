@@ -5,6 +5,7 @@
 #include "network.h"
 #include "palette.h"
 #include "profile.h"
+#include "server_settings.h"
 #include "ui.h"
 #include "voice.h"
 
@@ -37,7 +38,7 @@ const std::vector<std::wstring> colorNames{L"Red", L"Orange", L"Yellow", L"Lime"
 enum Control { ServerList = 100, NewServer, Join, Actions, Profile, Settings, Archive, Tree, Transcript, Message, Send,
     Invite, LeaveServer, DeleteServer, AddTextRoom, AddVoiceRoom, DeleteRoom, Kick, Export,
     Mic, LeaveVoice, ParticipantVolume, MicSlider, OutputSlider, MuteParticipant, KickVoice, RenameRoom, LeaveText, InviteCode,
-    OpenChatFile, RestoreWindow, QuitApp, SetRoomLimit, CopyProfileCode, ForgetMember };
+    OpenChatFile, RestoreWindow, QuitApp, SetRoomLimit, CopyProfileCode, ServerSettings = 135, RenameServer, ServerMembers, ToggleRooms };
 constexpr unsigned serverMenuBase = 1000;
 constexpr int maxMicrophoneGain = 150;
 constexpr int maxOutputGain = 110;
@@ -165,6 +166,7 @@ struct Owned {
 
 struct Node {
     std::string kind, id;
+    int voiceLimit = 0;
 };
 
 class App {
@@ -182,7 +184,7 @@ public:
     void close();
 
 private:
-    HWND servers{}, tree{}, transcript{}, composer{}, newServer{}, join{}, actions{}, muteButton{}, micSlider{}, outputSlider{};
+    HWND servers{}, tree{}, transcript{}, composer{}, newServer{}, join{}, actions{}, serverSettings{}, roomsToggle{}, roomsTip{}, muteButton{}, micSlider{}, outputSlider{};
     HFONT regular{}, bold{}, heading{};
     HBRUSH background{}, fieldBrush{};
     HIMAGELIST icons{};
@@ -192,6 +194,7 @@ private:
     std::unique_ptr<HostProcess> guest, joiningGuest;
     Voice audio;
     ChatSounds chatSounds;
+    ServerSettingsPanel serverPanel;
     unsigned generation = 0, nextGeneration = 0, parkedGeneration = 0;
     std::uint64_t version = 0;
     bool connected = false, registering = false, archiveChat = true, retainOwned = true, remember = true, rememberColor = true;
@@ -199,7 +202,9 @@ private:
     UINT taskbarCreated = 0;
     std::wstring hiddenDraft;
     bool rebuilding = false, closing = false;
-    bool textClosed = false, offlineExpanded = false;
+    bool textClosed = false, showVoiceLimits = false;
+    bool sidebarCollapsed = false, resizingSidebar = false;
+    int sidebarWidthDip = 0, gripOffset = 0;
     bool micPending = false;
     int publishedMic = -1, shownMic = -1;
     ULONGLONG retryMicAt = 0;
@@ -213,7 +218,7 @@ private:
     ULONGLONG clockNext = 0, retryAt = 0, joinUntil = 0, nextRegistration = 0, probeAt = 0, guestOfflineSince = 0;
     unsigned timerInterval = 250;
     std::wstring address{localAddress}, microphone, playback, status{L"Connecting to the relay…"};
-    std::string name, id, initialInvite, pendingJoin, currentText, currentVoice, profileSecret, publicCode;
+    std::string name, id, initialInvite, pendingJoin, currentText, currentVoice, profileSecret, runNonce, publicCode;
     std::wstring hostAddress, guestAddress;
     std::string hostRoute, hostTicket, parkedID, hostJoin, guestInvite, candidateInvite, afterRegistration;
     int guestTurnPort = 0;
@@ -262,6 +267,7 @@ private:
     void trayMenu(POINT point);
     bool saveLayout(const Owned& item);
     void registerClient();
+    void onCommandReply(const std::string& op, const Json& request, const Json& response);
     void startNetwork(const std::wstring& endpoint);
     void useHost();
     void ensureHost(std::string joinCode = {});
@@ -274,6 +280,10 @@ private:
     void refreshServers();
     void applyState(const Json& data);
     void refreshTree();
+    void drawVoiceLimits(HDC dc) const;
+    Layout layout() const;
+    void toggleRooms();
+    void setRoomsHint();
     bool speakingNow() const;
     int memberImage(const Json& member) const;
     void updateMemberImage(const std::string& session);
@@ -303,7 +313,9 @@ private:
     void promptPlayback(HWND parent);
     void serverPicker();
     void popupActions();
-    void addRoom(bool text);
+    void showServerSettings(bool membersFirst);
+    void serverAction(HWND parent, ServerAction action, const std::string& target = {});
+    void addRoom(bool text, HWND parent);
     Node selectedNode() const;
     void localLogs();
     void openChatFile();
@@ -352,7 +364,8 @@ void App::load() {
     archiveChat = savedValue(doc, "local_chat", true);
     retainOwned = savedValue(doc, "save_owned", true);
     closeToTray = savedValue(doc, "close_to_tray", true);
-    offlineExpanded = savedValue(doc, "offline_expanded", false);
+    sidebarCollapsed = savedValue(doc, "sidebar_collapsed", false);
+    sidebarWidthDip = std::clamp(savedValue(doc, "sidebar_width_dip", 0), 0, 32767);
     microphone = wide(savedValue(doc, "microphone", ""));
     playback = wide(savedValue(doc, "playback", ""));
     audio.mode = std::clamp(savedValue(doc, "audio_mode", 0), 0, 2);
@@ -401,7 +414,8 @@ void App::load() {
         profileSecret = randomCode(40);
         saveVoicePreferences();
     }
-    publicCode = profileCode(profileSecret);
+    runNonce = randomCode(40);
+    publicCode = runProfileCode(profileSecret, runNonce);
     wchar_t demoAddress[256]{};
     const DWORD length = GetEnvironmentVariableW(L"KANAL_DEMO_ADDRESS", demoAddress, ARRAYSIZE(demoAddress));
     if (length && length < ARRAYSIZE(demoAddress)) {
@@ -433,7 +447,8 @@ void App::save() {
         {"local_chat", archiveChat}, {"save_owned", retainOwned}, {"microphone", utf8(microphone)},
         {"playback", utf8(playback)}, {"audio_mode", audio.mode.load()}, {"mic_gain", audio.inputGain.load()},
         {"output_gain", audio.outputGain.load()}, {"mic_threshold", savedThreshold}, {"mic_muted", audio.muted.load()},
-        {"playback_eq_db", savedEqualizer}, {"normalization_percent", savedNormalization}, {"close_to_tray", closeToTray}, {"offline_expanded", offlineExpanded},
+        {"playback_eq_db", savedEqualizer}, {"normalization_percent", savedNormalization}, {"close_to_tray", closeToTray},
+        {"sidebar_collapsed", sidebarCollapsed}, {"sidebar_width_dip", sidebarWidthDip},
         {"voice_bitrate_kbps", audio.bitrateKbps.load()}, {"five_percent_steps", fivePercentSteps}, {"ptt", pushKey}};
     if (rememberColor) doc["color"] = color;
     if (remember) {
@@ -474,7 +489,7 @@ void App::registerClient() {
     if (!network || registering) return;
     registering = true;
     nextRegistration = GetTickCount64() + 4000;
-    sendRequest({{"op", "register"}, {"name", name}, {"color", color}, {"profile", profileSecret}, {"voice_indicators", true}, {"muted", audio.muted.load()}});
+    sendRequest({{"op", "register"}, {"name", name}, {"color", color}, {"profile", profileSecret}, {"run_nonce", runNonce}, {"voice_indicators", true}, {"muted", audio.muted.load()}});
 }
 
 void App::startNetwork(const std::wstring& endpoint) {
@@ -551,7 +566,7 @@ void App::parkedHostResult(NetworkResult result) {
         }
     } else if (reply.value("expired", false) && parkedRegistered) {
         parkedRegistered = false;
-        parkedHost->send({{"op", "register"}, {"name", name}, {"color", color}, {"profile", profileSecret}, {"voice_indicators", true}, {"muted", audio.muted.load()}});
+        parkedHost->send({{"op", "register"}, {"name", name}, {"color", color}, {"profile", profileSecret}, {"run_nonce", runNonce}, {"voice_indicators", true}, {"muted", audio.muted.load()}});
     }
     for (const auto& event : arrayOr(reply, "events")) handleEvent(event, parkedHost.get());
 }
@@ -576,7 +591,7 @@ void App::tickHelpers() {
                 parkedGeneration = ++nextGeneration;
                 parkedRegistered = false;
                 parkedHost = std::make_unique<Network>(window, hostAddress, parkedGeneration);
-                parkedHost->send({{"op", "register"}, {"name", name}, {"color", color}, {"profile", profileSecret}, {"voice_indicators", true}, {"muted", audio.muted.load()}});
+                parkedHost->send({{"op", "register"}, {"name", name}, {"color", color}, {"profile", profileSecret}, {"run_nonce", runNonce}, {"voice_indicators", true}, {"muted", audio.muted.load()}});
             }
             refreshActions();
         }
@@ -754,14 +769,29 @@ void App::applyState(const Json& data) {
         if (!found) currentText = textClosed ? std::string{} : first;
     }
     if (beforeText != currentText || old != active()) refreshChat();
-    if (auto pos = owned.find(active()); pos != owned.end()) {
+    const auto current = active();
+    const auto newName = state.value("name", "");
+    bool saveNames = false;
+    if (auto pos = owned.find(current); pos != owned.end()) {
+        if (pos->second.name != newName) {
+            pos->second.name = newName;
+            saveNames = true;
+        }
         auto layout = arrayOr(state, "rooms");
         if (pos->second.rooms != layout) {
             pos->second.rooms = std::move(layout);
             saveLayout(pos->second);
         }
     }
+    if (auto pos = bookmarks.find(current); pos != bookmarks.end() && pos->second != newName) {
+        pos->second = newName;
+        saveNames = true;
+    }
+    if (auto pos = available.find(current); pos != available.end()) pos->second = newName;
+    if (saveNames) save();
+    if (saveNames || newName != previous.value("name", "")) refreshServers();
     if (previous != state) {
+        serverPanel.update(state, id, publicCode);
         refreshTree();
         updateParticipantVolumes();
         const auto presence = chatPresence(previous, state);
@@ -797,7 +827,7 @@ int App::memberImage(const Json& member) const {
 void App::updateMemberImage(const std::string& session) {
     auto row = memberItems.find(session);
     auto idx = memberIndices.find(session);
-    if (!tree || inTray || row == memberItems.end() || idx == memberIndices.end()) return;
+    if (!tree || inTray || sidebarCollapsed || row == memberItems.end() || idx == memberIndices.end()) return;
     TVITEMW item{};
     item.mask = TVIF_IMAGE | TVIF_SELECTEDIMAGE;
     item.hItem = row->second;
@@ -820,10 +850,11 @@ void App::publishMic() {
 }
 
 void App::refreshTree() {
-    if (!tree || inTray) return;
+    if (!tree || inTray || sidebarCollapsed) return;
     rebuilding = true;
     SendMessageW(tree, WM_SETREDRAW, FALSE, 0);
     TreeView_DeleteAllItems(tree);
+    showVoiceLimits = false;
     nodes.clear();
     memberItems.clear();
     auto add = [&](HTREEITEM parent, std::wstring text, Node data, int image = I_IMAGENONE) {
@@ -841,14 +872,16 @@ void App::refreshTree() {
         auto texts = add(TVI_ROOT, L"Text rooms", {"text_group", {}});
         auto voices = add(TVI_ROOT, L"Voice rooms", {"voice_group", {}});
         auto present = add(TVI_ROOT, L"Online", {});
-        auto offline = add(TVI_ROOT, L"Offline", {"offline_group", {}});
         HTREEITEM selected = nullptr;
         std::unordered_map<std::string, HTREEITEM> rooms;
         for (const auto& r : arrayOr(state, "rooms")) {
             const auto kind = r.value("kind", ""), code = r.value("id", "");
             auto label = wide(r.value("name", ""));
             if (state.value("voice", "") == code) label += L"  ✓";
-            auto item = add(kind == "text" ? texts : voices, std::move(label), {kind, code});
+            const int cap = r.value("limit", 0);
+            const int shown = kind == "voice" && cap > 0 && cap < 16 ? cap : 0;
+            showVoiceLimits |= shown != 0;
+            auto item = add(kind == "text" ? texts : voices, std::move(label), {kind, code, shown});
             rooms.emplace(code, item);
             if (code == currentText) selected = item;
         }
@@ -861,11 +894,6 @@ void App::refreshTree() {
             auto parent = voice == rooms.end() ? present : voice->second;
             memberItems[memberID] = add(parent, std::move(label), {"user", memberID}, memberImage(member));
         }
-        for (const auto& member : arrayOr(state, "offline")) {
-            add(offline, wide(member.value("name", "")), {"offline_user", member.value("profile_code", "")},
-                std::clamp(member.value("color", 0), 0, 15) * 4);
-        }
-        if (offlineExpanded) TreeView_Expand(tree, offline, TVE_EXPAND);
         for (const auto& [_, node] : rooms) TreeView_Expand(tree, node, TVE_EXPAND);
         for (auto root : {texts, voices, present}) TreeView_Expand(tree, root, TVE_EXPAND);
         if (selected) TreeView_SelectItem(tree, selected);
@@ -874,6 +902,36 @@ void App::refreshTree() {
     InvalidateRect(tree, nullptr, TRUE);
     InvalidateRect(window, nullptr, FALSE);
     rebuilding = false;
+}
+
+void App::drawVoiceLimits(HDC dc) const {
+    RECT area{};
+    GetClientRect(tree, &area);
+    const int dpi = GetDpiForWindow(tree), gap = MulDiv(5, dpi, 96);
+    const int saved = SaveDC(dc);
+    SelectObject(dc, regular);
+    for (auto row = TreeView_GetFirstVisible(tree); row; row = TreeView_GetNextVisible(tree, row)) {
+        RECT label{};
+        if (!TreeView_GetItemRect(tree, row, &label, TRUE) || label.top >= area.bottom) break;
+        auto it = nodes.find(row);
+        if (it == nodes.end() || !it->second.voiceLimit) continue;
+        wchar_t name[96]{};
+        TVITEMW item{};
+        item.hItem = row;
+        item.mask = TVIF_TEXT;
+        item.pszText = name;
+        item.cchTextMax = ARRAYSIZE(name);
+        if (!TreeView_GetItem(tree, &item)) continue;
+        label.right = area.right;
+        fillColor(dc, label, row == TreeView_GetSelection(tree) ? theme::selected : theme::sidebar);
+        const int end = label.right - gap;
+        RECT count{end - MulDiv(21, dpi, 96), label.top, end, label.bottom};
+        label.right = std::max(label.left, count.left - gap);
+        drawTextLine(dc, label, name, theme::text);
+        drawTextLine(dc, count, std::to_wstring(it->second.voiceLimit), theme::gray(10),
+            DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
+    }
+    RestoreDC(dc, saved);
 }
 
 void App::refreshChat() {
@@ -893,6 +951,7 @@ void App::refreshChat() {
 void App::refreshActions() {
     if (!tree || inTray) return;
     const bool joined = !active().empty();
+    EnableWindow(serverSettings, joined);
     EnableWindow(composer, joined && !currentText.empty());
     ShowWindow(transcript, joined && !currentText.empty() ? SW_SHOWNA : SW_HIDE);
     EnableWindow(newServer, directHosting ? !hostStarting && !joiningGuest : connected);
@@ -1092,6 +1151,7 @@ void App::onNetwork(NetworkResult result) {
             if (response.value("network", false)) sendRequest({{"op", "sync"}, {"code", active()}});
         }
         statusText(wide(response.value("error", "")));
+        if (request.value("code", "") == active()) serverPanel.feedback(status);
         if (op == "join") pendingJoin.clear();
         if (response.value("expired", false) && connected) {
             connected = false;
@@ -1147,6 +1207,10 @@ void App::onNetwork(NetworkResult result) {
     }
     for (const auto& e : arrayOr(response, "events")) handleEvent(e, network.get());
     if (response.value("restored", false)) statusText(L"Connection to the relay restored.");
+    if (op != "poll") onCommandReply(op, request, response);
+}
+
+void App::onCommandReply(const std::string& op, const Json& request, const Json& response) {
     if (op == "catalog") {
         auto latest = available;
         for (const auto& code : arrayOr(request, "codes")) latest.erase(code.get<std::string>());
@@ -1206,7 +1270,12 @@ void App::onNetwork(NetworkResult result) {
             audio.connect(url, response.value("token", ""), microphone, playback, std::move(relay));
         }
     } else if (op == "room_limit" && request.value("code", "") == active()) {
-        statusText(L"Room limit set to " + std::to_wstring(request.value("limit", 16)) + L".");
+        statusText(L"Voice room limit set to " + std::to_wstring(request.value("limit", 16)) + L".");
+        serverPanel.feedback(status);
+    } else if ((op == "server_rename" || op == "room_add" || op == "room_delete" || op == "room_rename" || op == "forget_member") && request.value("code", "") == active()) {
+        statusText(op == "server_rename" ? L"Server renamed." : op == "room_add" ? L"Room created." :
+            op == "room_delete" ? L"Room deleted." : op == "room_rename" ? L"Room renamed." : L"Member removed.");
+        serverPanel.feedback(status);
     } else if (op == "leave") {
         statusText(L"You left the server.");
     }
@@ -1278,7 +1347,7 @@ void App::promptCreate() {
     auto secret = randomCode(40);
     auto code = inviteCode(secret);
     auto rooms = Json::array({
-        {{"id", randomCode(12)}, {"kind", "text"}, {"name", "General"}, {"limit", 16}},
+        {{"id", randomCode(12)}, {"kind", "text"}, {"name", "General"}},
         {{"id", randomCode(12)}, {"kind", "voice"}, {"name", "Lounge"}, {"limit", 16}}
     });
     auto& item = owned.emplace(code, Owned{code, utf8(title), std::move(secret), std::move(rooms)}).first->second;
@@ -1496,6 +1565,8 @@ void App::popupActions() {
         {Invite, L"Copy invite link", joined},
         {LeaveServer, L"Leave server", joined},
         {0, L"", false, true},
+        {RenameServer, L"Rename server…", canManage && state.value("server_rename", false)},
+        {ServerMembers, L"Server members…", joined},
         {AddTextRoom, L"New text room…", canManage},
         {AddVoiceRoom, L"New voice room…", canManage},
         {DeleteRoom, L"Delete selected room…", canManage && (selected.kind == "text" || selected.kind == "voice")},
@@ -1507,11 +1578,75 @@ void App::popupActions() {
     if (pick) command(static_cast<int>(pick), 0);
 }
 
-void App::addRoom(bool text) {
+void App::showServerSettings(bool membersFirst) {
+    const auto code = active();
+    if (code.empty()) return;
+    serverPanel.show(window, state, id, publicCode, membersFirst,
+        [this, code](HWND parent, ServerAction action, const std::string& target) {
+            if (active() == code) serverAction(parent, action, target);
+        });
+}
+
+void App::serverAction(HWND parent, ServerAction action, const std::string& target) {
+    const auto code = active();
+    if (code.empty()) return;
+    if (action == ServerAction::ExportMembers) {
+        const auto content = serverPanel.membersText();
+        const auto path = chooseTextExport(parent, L"Export server members", L"TinySpeak-members.txt");
+        if (!path.empty()) {
+            const auto message = writeText(path, content) ? L"Member list exported." : L"The member list could not be saved.";
+            serverPanel.feedback(message);
+            statusText(message);
+        }
+        return;
+    }
+    if (!owner()) return;
+    if (action == ServerAction::AddText || action == ServerAction::AddVoice) {
+        addRoom(action == ServerAction::AddText, parent);
+        return;
+    }
+    if (action == ServerAction::Rename) {
+        if (!state.value("server_rename", false)) return;
+        std::vector<Field> fields{{Field::Text, L"Server name", wide(state.value("name", ""))}};
+        if (form(parent, L"Rename server", fields) && active() == code && owner())
+            sendRequest({{"op", "server_rename"}, {"code", code}, {"name", utf8(fields[0].text)}});
+        return;
+    }
+    if (action == ServerAction::ForgetMember) {
+        if (validCode(target) && MessageBoxW(parent, L"Remove this former member from the server list?",
+                L"TinySpeak", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES && active() == code && owner())
+            sendRequest({{"op", "forget_member"}, {"code", code}, {"target", target}});
+        return;
+    }
+    const auto rooms = arrayOr(state, "rooms");
+    const auto it = std::ranges::find_if(rooms, [&](const Json& r) { return r.value("id", "") == target; });
+    if (it == rooms.end()) return;
+    const auto name = wide(it->value("name", ""));
+    if (action == ServerAction::RenameRoom) {
+        std::vector<Field> fields{{Field::Text, L"Room name", name}};
+        if (form(parent, L"Rename room", fields) && active() == code && owner())
+            sendRequest({{"op", "room_rename"}, {"code", code}, {"room", target}, {"name", utf8(fields[0].text)}});
+    } else if (action == ServerAction::VoiceLimit && it->value("kind", "") == "voice" && state.contains("text_room")) {
+        const int before = it->value("limit", 0);
+        std::vector<std::wstring> sizes;
+        for (int n = 1; n <= 16; ++n) sizes.push_back(std::to_wstring(n));
+        std::vector<Field> fields{{Field::Choice, L"Maximum people in " + name, L"", std::move(sizes),
+            before > 0 && before <= 16 ? before - 1 : 15}};
+        if (form(parent, L"Room limit", fields) && active() == code && owner())
+            sendRequest({{"op", "room_limit"}, {"code", code}, {"room", target}, {"limit", fields[0].selected + 1}});
+    } else if (action == ServerAction::DeleteRoom && rooms.size() > 1) {
+        const auto prompt = L"Delete “" + name + L"”?";
+        if (MessageBoxW(parent, prompt.c_str(), L"Delete room", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES &&
+                active() == code && owner())
+            sendRequest({{"op", "room_delete"}, {"code", code}, {"room", target}});
+    }
+}
+
+void App::addRoom(bool text, HWND parent) {
     if (!owner()) return;
     const auto code = active();
     std::vector<Field> fields{{Field::Text, L"Room name", L""}};
-    if (form(window, text ? L"New text room" : L"New voice room", fields)) {
+    if (form(parent, text ? L"New text room" : L"New voice room", fields) && active() == code && owner()) {
         sendRequest({{"op", "room_add"}, {"code", code}, {"kind", text ? "text" : "voice"},
             {"name", utf8(fields.front().text)}});
     }
@@ -1525,22 +1660,14 @@ void App::exportLog(const fs::path& archive) {
             for (const auto& entry : found->second) text += entry.exportLine();
         }
     }
-    wchar_t file[32768] = L"TinySpeak-chat.txt";
-    OPENFILENAMEW dialog{sizeof(dialog)};
-    dialog.hwndOwner = window;
-    dialog.lpstrFilter = L"Text file (*.txt)\0*.txt\0\0";
-    dialog.lpstrFile = file;
-    dialog.nMaxFile = ARRAYSIZE(file);
-    dialog.lpstrDefExt = L"txt";
-    dialog.lpstrTitle = L"Export chat as TXT";
-    dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    if (!GetSaveFileNameW(&dialog)) return;
+    const auto file = chooseTextExport(window, L"Export chat as TXT", L"TinySpeak-chat.txt");
+    if (file.empty()) return;
     bool saved;
     if (archive.empty()) {
         saved = writeText(file, text);
     } else {
         std::error_code ec;
-        saved = fs::equivalent(archive, file, ec) || CopyFileW(archive.c_str(), file, FALSE);
+        saved = fs::equivalent(archive, file, ec) || CopyFileW(archive.c_str(), file.c_str(), FALSE);
     }
     statusText(saved ? L"TXT file saved." : L"The TXT file could not be saved.");
 }
@@ -1630,11 +1757,10 @@ void App::treeMenu(const Node& node, const POINT& screen) {
     const auto member = node.kind == "user" ? voicePeer(node.id) : Json::object();
     const auto peer = member.empty() ? std::string{} : peerKey(member);
     const auto targetRoom = node.kind == "user" ? participantRoom(node.id) : std::string{};
-    auto profile = node.kind == "offline_user" ? node.id : std::string{};
-    if (node.kind == "user") {
+    std::string profile;
+    if (node.kind == "user" && node.id != id) {
         if (const auto it = memberIndices.find(node.id); it != memberIndices.end())
             profile = state.at("users").at(it->second).value("profile_code", "");
-        if (node.id == id) profile = publicCode;
     }
     if (owner() && (node.kind == "text" || node.kind == "text_group"))
         entries.push_back({AddTextRoom, L"New text room…"});
@@ -1643,8 +1769,14 @@ void App::treeMenu(const Node& node, const POINT& screen) {
     if (node.kind == "voice" || node.kind == "text") {
         if (node.kind == "voice" && node.id == voice) entries.push_back({LeaveVoice, L"Leave voice room"});
         if (node.kind == "text" && node.id == currentText) entries.push_back({LeaveText, L"Leave text channel"});
-        if (owner() && state.contains("text_room")) entries.push_back({SetRoomLimit, L"Set room limit…"});
-        if (owner()) entries.push_back({RenameRoom, node.kind == "voice" ? L"Rename room…" : L"Rename channel…"});
+        if (owner() && node.kind == "voice" && state.contains("text_room")) entries.push_back({SetRoomLimit, L"Set room limit…"});
+        if (owner()) {
+            entries.push_back({RenameRoom, node.kind == "voice" ? L"Rename room…" : L"Rename channel…"});
+            entries.push_back({DeleteRoom, L"Delete room…", state.at("rooms").size() > 1});
+        }
+    } else if (node.kind == "user" && node.id == id) {
+        entries.push_back({Profile, L"Change username…"});
+        if (!voice.empty()) entries.push_back({LeaveVoice, L"Leave voice room"});
     } else if (node.kind == "user") {
         if (!peer.empty()) {
             entries.push_back({MuteParticipant, mutedParticipants.contains(peer) ? L"Unmute for me" : L"Mute for me"});
@@ -1653,38 +1785,21 @@ void App::treeMenu(const Node& node, const POINT& screen) {
         if (owner() && !targetRoom.empty()) entries.push_back({KickVoice, L"Remove from voice room"});
     }
     if (validCode(profile)) entries.push_back({CopyProfileCode, L"Copy profile code"});
-    if (owner() && node.kind == "offline_user") entries.push_back({ForgetMember, L"Remove from server"});
     if (entries.empty()) return;
     const auto action = showMenu(window, tree, std::move(entries), false, &screen);
     if (active() != code) return;
     switch (action) {
-    case AddTextRoom: addRoom(true); break;
-    case AddVoiceRoom: addRoom(false); break;
-    case SetRoomLimit: {
-        if (!owner()) break;
-        for (const auto& room : arrayOr(state, "rooms")) {
-            if (room.value("id", "") != node.id) continue;
-            const int previous = room.value("limit", 0);
-            std::vector<std::wstring> sizes;
-            for (int n = 1; n <= 16; ++n) sizes.push_back(std::to_wstring(n));
-            std::vector<Field> fields{{Field::Choice, L"Maximum people in " + wide(room.value("name", "")), L"",
-                std::move(sizes), (previous >= 1 && previous <= 16 ? previous : 16) - 1}};
-            if (form(window, L"Room limit", fields) && active() == code && owner())
-                sendRequest({{"op", "room_limit"}, {"code", code}, {"room", node.id}, {"limit", fields[0].selected + 1}});
-            break;
-        }
-        break;
-    }
+    case Profile: if (node.kind == "user" && node.id == id) promptProfile(); break;
+    case AddTextRoom: addRoom(true, window); break;
+    case AddVoiceRoom: addRoom(false, window); break;
+    case SetRoomLimit: serverAction(window, ServerAction::VoiceLimit, node.id); break;
+    case DeleteRoom: serverAction(window, ServerAction::DeleteRoom, node.id); break;
     case CopyProfileCode:
         if (validCode(profile)) { clipboard(window, wide(profile)); statusText(L"Profile code copied."); }
         break;
-    case ForgetMember:
-        if (owner() && node.kind == "offline_user" && MessageBoxW(window, L"Remove this offline member from the server?",
-            L"TinySpeak", MB_YESNO | MB_ICONQUESTION) == IDYES)
-            sendRequest({{"op", "forget_member"}, {"code", code}, {"target", profile}});
-        break;
     case LeaveVoice:
-        if (state.value("voice", "") == node.id) command(LeaveVoice, 0);
+        if ((node.kind == "user" && node.id == id && !state.value("voice", "").empty()) ||
+            (node.kind == "voice" && state.value("voice", "") == node.id)) command(LeaveVoice, 0);
         break;
     case LeaveText:
         if (currentText == node.id) {
@@ -1699,14 +1814,7 @@ void App::treeMenu(const Node& node, const POINT& screen) {
             refreshActions();
         }
         break;
-    case RenameRoom: {
-        if (!owner()) break;
-        std::vector<Field> fields{{Field::Text, L"Name", roomName(node.id)}};
-        if (form(window, L"Rename", fields) && active() == code) {
-            sendRequest({{"op", "room_rename"}, {"code", code}, {"room", node.id}, {"name", utf8(fields.front().text)}});
-        }
-        break;
-    }
+    case RenameRoom: serverAction(window, ServerAction::RenameRoom, node.id); break;
     case MuteParticipant:
         if (!peer.empty() && !voicePeer(node.id).empty()) {
             if (!mutedParticipants.erase(peer)) mutedParticipants.insert(peer);
@@ -1757,21 +1865,14 @@ LRESULT App::onNotify(NMHDR* note) {
     if (note->hwndFrom == tree) {
         if (note->code == NM_CUSTOMDRAW) {
             auto& item = *reinterpret_cast<NMTVCUSTOMDRAW*>(note);
-            if (item.nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
+            if (item.nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW | (showVoiceLimits ? CDRF_NOTIFYPOSTPAINT : 0);
+            if (item.nmcd.dwDrawStage == CDDS_POSTPAINT && showVoiceLimits) drawVoiceLimits(item.nmcd.hdc);
             if (item.nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
                 const bool selected = (item.nmcd.uItemState & CDIS_SELECTED) != 0;
                 item.nmcd.uItemState &= ~(CDIS_SELECTED | CDIS_FOCUS | CDIS_HOT);
                 item.clrText = theme::text;
                 item.clrTextBk = selected ? theme::selected : theme::sidebar;
                 return CDRF_NEWFONT;
-            }
-        }
-        if (note->code == TVN_ITEMEXPANDEDW && !rebuilding) {
-            const auto& change = *reinterpret_cast<NMTREEVIEWW*>(note);
-            const auto entry = nodes.find(change.itemNew.hItem);
-            if (entry != nodes.end() && entry->second.kind == "offline_group") {
-                offlineExpanded = (change.itemNew.state & TVIS_EXPANDED) != 0;
-                save();
             }
         }
         if (note->code == TVN_SELCHANGEDW) selectTree();
@@ -1792,12 +1893,16 @@ LRESULT App::onNotify(NMHDR* note) {
 }
 
 void App::command(int which, int notification) {
-    if ((which == ServerList || which == NewServer || which == Join || which == Actions) && notification != BN_CLICKED) return;
+    if ((which == ServerList || which == NewServer || which == Join || which == Actions || which == ServerSettings) && notification != BN_CLICKED) return;
     switch (which) {
     case ServerList: serverPicker(); break;
     case NewServer: promptCreate(); break;
     case Join: promptJoin(); break;
     case Actions: popupActions(); break;
+    case ServerSettings: showServerSettings(false); break;
+    case ToggleRooms: toggleRooms(); break;
+    case ServerMembers: showServerSettings(true); break;
+    case RenameServer: serverAction(window, ServerAction::Rename); break;
     case Profile: promptProfile(); break;
     case Settings: promptSettings(); break;
     case Archive: localLogs(); break;
@@ -1828,17 +1933,9 @@ void App::command(int which, int notification) {
         }
         break;
     }
-    case AddTextRoom: addRoom(true); break;
-    case AddVoiceRoom: addRoom(false); break;
-    case DeleteRoom: {
-        const auto selected = selectedNode();
-        const auto code = active();
-        if (owner() && (selected.kind == "text" || selected.kind == "voice") &&
-            MessageBoxW(window, L"Delete the selected room?", L"TinySpeak", MB_YESNO | MB_ICONQUESTION) == IDYES) {
-            sendRequest({{"op", "room_delete"}, {"code", code}, {"room", selected.id}});
-        }
-        break;
-    }
+    case AddTextRoom: addRoom(true, window); break;
+    case AddVoiceRoom: addRoom(false, window); break;
+    case DeleteRoom: serverAction(window, ServerAction::DeleteRoom, selectedNode().id); break;
     case Kick: {
         const auto selected = selectedNode();
         if (owner() && selected.kind == "user" && selected.id != id) {
@@ -1899,7 +1996,7 @@ void App::redrawAudioPanel() {
     if (!tree || inTray) return;
     RECT rect{};
     GetClientRect(window, &rect);
-    rect.top = layoutFor(rect.right, rect.bottom, GetDpiForWindow(window)).footerTop;
+    rect.top = layout().footerTop;
     InvalidateRect(window, &rect, FALSE);
 }
 
@@ -1941,6 +2038,7 @@ void App::tick() {
 void App::close() {
     if (closing) return;
     closing = true;
+    serverPanel.close();
     if (inTray) removeTrayIcon();
     audio.permitted = false;
     audio.disconnect();
@@ -2036,7 +2134,20 @@ void App::createView() {
     servers = button(L"Select a server", ServerList);
     newServer = button(L"New server", NewServer);
     join = button(L"Join", Join);
+    serverSettings = button(L"Server settings", ServerSettings);
     actions = button(L"Menu", Actions);
+    roomsToggle = button(L"Collapse rooms", ToggleRooms);
+    roomsTip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (roomsTip) {
+        TOOLINFOW info{sizeof(info)};
+        info.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+        info.hwnd = window;
+        info.uId = reinterpret_cast<UINT_PTR>(roomsToggle);
+        info.lpszText = const_cast<wchar_t*>(L"Collapse rooms");
+        SendMessageW(roomsTip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&info));
+    }
+    setRoomsHint();
     tree = make(WC_TREEVIEWW, L"", WS_TABSTOP | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT |
         TVS_SHOWSELALWAYS | TVS_DISABLEDRAGDROP | TVS_NOHSCROLL, Tree);
     SetWindowTheme(tree, L"", L"");
@@ -2123,10 +2234,11 @@ void App::setup() {
 
 void App::destroyView() {
     rebuilding = true;
+    if (roomsTip) DestroyWindow(std::exchange(roomsTip, nullptr));
     while (auto child = GetWindow(window, GW_CHILD)) DestroyWindow(child);
     nodes.clear();
     memberItems.clear();
-    servers = tree = transcript = composer = newServer = join = actions = nullptr;
+    servers = tree = transcript = composer = newServer = join = actions = serverSettings = roomsToggle = nullptr;
     muteButton = micSlider = outputSlider = nullptr;
     if (icons) ImageList_Destroy(std::exchange(icons, nullptr));
     for (auto font : {regular, bold, heading}) if (font) DeleteObject(font);
@@ -2186,28 +2298,59 @@ void App::trayMenu(POINT point) {
     if (pick) command(static_cast<int>(pick), 0);
 }
 
-void App::arrange() {
-    if (!tree) return;
+Layout App::layout() const {
     RECT bounds{};
     GetClientRect(window, &bounds);
+    return layoutFor(bounds.right, bounds.bottom, GetDpiForWindow(window), sidebarWidthDip, sidebarCollapsed);
+}
+
+void App::setRoomsHint() {
+    const auto label = sidebarCollapsed ? L"Expand rooms" : L"Collapse rooms";
+    putText(roomsToggle, label);
+    if (roomsTip) {
+        TOOLINFOW info{sizeof(info)};
+        info.hwnd = window;
+        info.uFlags = TTF_IDISHWND;
+        info.uId = reinterpret_cast<UINT_PTR>(roomsToggle);
+        info.lpszText = const_cast<wchar_t*>(label);
+        SendMessageW(roomsTip, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&info));
+    }
+    InvalidateRect(roomsToggle, nullptr, TRUE);
+}
+
+void App::toggleRooms() {
+    if (!tree || inTray) return;
+    sidebarCollapsed = !sidebarCollapsed;
+    if (sidebarCollapsed && GetFocus() == tree) SetFocus(roomsToggle);
+    setRoomsHint();
+    arrange();
+    if (!sidebarCollapsed) refreshTree();
+    save();
+}
+
+void App::arrange() {
+    if (!tree) return;
     const int dpi = GetDpiForWindow(window);
-    const auto layout = layoutFor(bounds.right, bounds.bottom, dpi);
+    const auto view = layout();
     auto place = [](HWND control, const RECT& area) {
         MoveWindow(control, area.left, area.top, std::max<LONG>(1, area.right - area.left),
             std::max<LONG>(1, area.bottom - area.top), TRUE);
     };
-    place(servers, layout.server);
-    place(newServer, layout.create);
-    place(join, layout.join);
-    place(actions, layout.menu);
-    place(tree, layout.rooms);
-    place(transcript, layout.transcript);
-    RECT edit = layout.composer;
+    place(servers, view.server);
+    place(newServer, view.create);
+    place(join, view.join);
+    place(actions, view.menu);
+    place(serverSettings, view.serverSettings);
+    place(roomsToggle, view.toggleRooms);
+    if (!sidebarCollapsed) place(tree, view.rooms);
+    ShowWindow(tree, sidebarCollapsed ? SW_HIDE : SW_SHOWNA);
+    place(transcript, view.transcript);
+    RECT edit = view.composer;
     InflateRect(&edit, -MulDiv(10, dpi, 96), -MulDiv(8, dpi, 96));
     place(composer, edit);
-    place(muteButton, layout.mute);
-    place(micSlider, layout.input);
-    place(outputSlider, layout.output);
+    place(muteButton, view.mute);
+    place(micSlider, view.input);
+    place(outputSlider, view.output);
     InvalidateRect(window, nullptr, FALSE);
 }
 
@@ -2217,7 +2360,7 @@ void App::paint() {
     RECT bounds{};
     GetClientRect(window, &bounds);
     const auto dpi = GetDpiForWindow(window);
-    const auto l = layoutFor(bounds.right, bounds.bottom, dpi);
+    const auto l = layout();
     auto text = [&](RECT box, const std::wstring& value, HFONT font, COLORREF color) {
         auto old = SelectObject(dc, font);
         drawTextLine(dc, box, value, color);
@@ -2229,7 +2372,7 @@ void App::paint() {
     fillColor(dc, {0, l.toolbarBottom - 1, bounds.right, l.toolbarBottom}, theme::edge);
     fillColor(dc, {l.sidebarRight - 1, l.toolbarBottom, l.sidebarRight, l.footerTop}, theme::edge);
     text(l.brand, L"TinySpeak", bold, theme::text);
-    text(l.listTitle, L"Rooms", bold, theme::secondary);
+    if (!sidebarCollapsed) text(l.listTitle, L"Rooms", bold, theme::secondary);
     text(l.chatTitle, currentText.empty() ? L"Chat" : roomName(currentText), heading, theme::text);
     if (active().empty()) {
         auto hint = l.transcript;
@@ -2296,6 +2439,46 @@ LRESULT CALLBACK procedure(HWND window, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_ENDSESSION:
         if (wParam) app->close();
         return 0;
+    case WM_SETCURSOR:
+        if (LOWORD(lParam) == HTCLIENT && !app->sidebarCollapsed && app->tree && !app->inTray) {
+            POINT point{};
+            GetCursorPos(&point);
+            ScreenToClient(window, &point);
+            const auto view = app->layout();
+            if (app->resizingSidebar || PtInRect(&view.splitter, point)) {
+                SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
+                return TRUE;
+            }
+        }
+        break;
+    case WM_LBUTTONDOWN: {
+        if (!app->tree || app->sidebarCollapsed || app->inTray) break;
+        const auto view = app->layout();
+        const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (!PtInRect(&view.splitter, point)) break;
+        app->gripOffset = view.sidebarRight - point.x;
+        app->resizingSidebar = true;
+        SetCapture(window);
+        return 0;
+    }
+    case WM_MOUSEMOVE:
+        if (app->resizingSidebar && GetCapture() == window) {
+            RECT bounds{};
+            GetClientRect(window, &bounds);
+            const auto dpi = GetDpiForWindow(window);
+            const int maxWidth = std::max(148, MulDiv(bounds.right, 96, dpi) - 245);
+            const int wanted = std::clamp(MulDiv(GET_X_LPARAM(lParam) + app->gripOffset, 96, dpi), 148, maxWidth);
+            if (wanted != app->sidebarWidthDip) { app->sidebarWidthDip = wanted; app->arrange(); }
+            return 0;
+        }
+        break;
+    case WM_LBUTTONUP:
+    case WM_CANCELMODE:
+        if (app->resizingSidebar && GetCapture() == window) { ReleaseCapture(); return 0; }
+        break;
+    case WM_CAPTURECHANGED:
+        if (app->resizingSidebar) { app->resizingSidebar = false; app->save(); }
+        break;
     case WM_SIZE: if (wParam != SIZE_MINIMIZED) app->arrange(); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_PAINT:
@@ -2334,7 +2517,9 @@ LRESULT CALLBACK procedure(HWND window, UINT msg, WPARAM wParam, LPARAM lParam) 
         const auto& item = *reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
         if (drawMenu(item)) return TRUE;
         if (item.CtlType == ODT_BUTTON) {
-            if (item.CtlID == Mic) {
+            if (item.CtlID == ToggleRooms) {
+                drawRoomsToggle(item, app->sidebarCollapsed);
+            } else if (item.CtlID == Mic) {
                 drawMicrophoneButton(item, app->audio.muted.load());
             } else if (item.CtlID == ServerList) {
                 const auto code = app->active();
@@ -2436,7 +2621,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 SMTO_ABORTIFHUNG, 3000, &result) && result ? 0 : 1;
         }
     }
-    INITCOMMONCONTROLSEX common{sizeof(common), ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES | ICC_STANDARD_CLASSES};
+    INITCOMMONCONTROLSEX common{sizeof(common), ICC_TREEVIEW_CLASSES | ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES | ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&common);
     WNDCLASSW klass{};
     klass.hInstance = instance;

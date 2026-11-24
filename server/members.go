@@ -33,31 +33,27 @@ func (c *client) setMic(srv *server, muted, speaking bool) {
 	}
 }
 
-func (srv *server) occupancy(r room, exclude *client) int {
+func (srv *server) voiceOccupancy(id string, exclude *client) int {
 	used := 0
 	for _, member := range srv.members {
-		if member != exclude && ((r.Kind == "text" && member.textID == r.ID) || (r.Kind == "voice" && member.Voice == r.ID)) {
+		if member != exclude && member.Voice == id {
 			used++
 		}
 	}
 	return used
 }
 
-func (srv *server) hasRoom(r room, member *client) bool {
+func (srv *server) hasVoiceSeat(r room, member *client) bool {
 	limit := r.Limit
 	if limit == 0 {
-		// Previously saved text rooms kept all server members subscribed.
-		if r.Kind == "text" {
-			return true
-		}
 		limit = maxVoice
 	}
-	return srv.occupancy(r, member) < limit
+	return srv.voiceOccupancy(r.ID, member) < limit
 }
 
 func (srv *server) firstText() string {
 	for _, r := range srv.rooms {
-		if r.Kind == "text" && srv.hasRoom(r, nil) {
+		if r.Kind == "text" {
 			return r.ID
 		}
 	}
@@ -70,9 +66,24 @@ type knownProfile struct {
 	Color int    `json:"color"`
 }
 
-func (srv *server) hasOnline(code string) bool {
+// A saved roster index matches its entry in files created by Patch 17.
+type savedMember struct {
+	knownProfile
+	Key string `json:"member_key,omitempty"`
+}
+
+func (srv *server) keyForCode(code string) string {
+	for key, p := range srv.known {
+		if p.Code == code {
+			return key
+		}
+	}
+	return ""
+}
+
+func (srv *server) hasOnline(key string) bool {
 	for _, c := range srv.members {
-		if c.ProfileCode == code {
+		if c.memberKey == key {
 			return true
 		}
 	}
@@ -83,17 +94,17 @@ func (srv *server) hasSpace(c *client) bool {
 	if len(srv.members) >= maxUsers {
 		return false
 	}
-	if _, returning := srv.known[c.ProfileCode]; returning {
+	if _, returning := srv.known[c.memberKey]; returning {
 		return true
 	}
 	total := len(srv.known)
 	for _, m := range srv.members {
-		if m.ProfileCode == "" {
+		if m.memberKey == "" {
 			total++
 		}
 	}
-	if srv.owner != c.ID && srv.ownerCode != "" {
-		if _, counted := srv.known[srv.ownerCode]; !counted {
+	if srv.owner != c.ID && srv.ownerKey != "" {
+		if _, counted := srv.known[srv.ownerKey]; !counted {
 			total++
 		}
 	}
@@ -103,7 +114,7 @@ func (srv *server) hasSpace(c *client) bool {
 func (srv *server) offline() []knownProfile {
 	online := make(map[string]bool, len(srv.members))
 	for _, c := range srv.members {
-		online[c.ProfileCode] = true
+		online[c.memberKey] = true
 	}
 	var absent []knownProfile
 	for code, p := range srv.known {
@@ -121,17 +132,17 @@ func (srv *server) offline() []knownProfile {
 }
 
 func (s *service) rememberMember(srv *server, c *client) {
-	if c.ProfileCode == "" {
+	if c.memberKey == "" || c.ProfileCode == "" {
 		return
 	}
 	p := knownProfile{Code: c.ProfileCode, Name: c.Name, Color: c.Color}
-	if p == srv.known[p.Code] {
+	if p == srv.known[c.memberKey] {
 		return
 	}
 	if srv.known == nil {
 		srv.known = make(map[string]knownProfile)
 	}
-	srv.known[p.Code] = p
+	srv.known[c.memberKey] = p
 	if srv.archive {
 		s.saveRoster(srv)
 	}
@@ -146,7 +157,7 @@ func (s *service) loadRoster(srv *server) {
 	if err != nil {
 		return
 	}
-	var profiles []knownProfile
+	var profiles []savedMember
 	if json.Unmarshal(data, &profiles) != nil || len(profiles) > maxUsers {
 		return
 	}
@@ -154,7 +165,13 @@ func (s *service) loadRoster(srv *server) {
 	for _, p := range profiles {
 		name, ok := cleanLabel(p.Name, 4, 32)
 		if ok && name == p.Name && validID(p.Code, 16) && p.Color >= 0 && p.Color < 16 {
-			srv.known[p.Code] = p
+			key := p.Key
+			if key == "" {
+				key = p.Code
+			}
+			if validID(key, 16) {
+				srv.known[key] = p.knownProfile
+			}
 		}
 	}
 }
@@ -171,9 +188,9 @@ func (s *service) saveRoster(srv *server) {
 	if os.MkdirAll(s.rosterDir, 0700) != nil {
 		return
 	}
-	profiles := make([]knownProfile, 0, len(srv.known))
-	for _, p := range srv.known {
-		profiles = append(profiles, p)
+	profiles := make([]savedMember, 0, len(srv.known))
+	for key, p := range srv.known {
+		profiles = append(profiles, savedMember{knownProfile: p, Key: key})
 	}
 	file, err := os.CreateTemp(s.rosterDir, ".members-*.tmp")
 	if err != nil {

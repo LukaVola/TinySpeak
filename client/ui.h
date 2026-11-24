@@ -17,10 +17,23 @@ void fillColor(HDC dc, const RECT& rectangle, COLORREF color);
 void drawTextLine(HDC dc, RECT rectangle, const std::wstring& label, COLORREF color,
     UINT flags = DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
 void drawButton(const DRAWITEMSTRUCT& item, bool dropdown, const std::wstring& title = {}, const std::wstring& tag = {});
+void drawRoomsToggle(const DRAWITEMSTRUCT& item, bool collapsed);
 void drawMicrophoneButton(const DRAWITEMSTRUCT& item, bool muted);
 LRESULT drawTrackbar(const NMCUSTOMDRAW& item, COLORREF surface);
 std::wstring percentText(int value);
 void configureSlider(HWND slider, SliderScale scale, int value, int pageStep = 1);
+
+struct EmptyDialog {
+    alignas(DWORD) DLGTEMPLATE dialog{};
+    WORD menu = 0, klass = 0, caption = 0;
+    EmptyDialog(short width, short height) {
+        dialog.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_CENTER;
+        dialog.cx = width;
+        dialog.cy = height;
+    }
+};
+
+std::filesystem::path chooseTextExport(HWND parent, const wchar_t* title, const wchar_t* filename);
 
 struct MenuEntry {
     unsigned id;

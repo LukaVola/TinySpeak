@@ -72,7 +72,7 @@ type client struct {
 	key, active, voiceID, textID string
 	indicators                   bool
 	pendingMic                   map[string]micState
-	invited                      string
+	invited, memberKey           string
 	seen, lastMessage            time.Time
 	pending                      []event
 	wake                         chan struct{}
@@ -82,16 +82,17 @@ type client struct {
 
 type server struct {
 	advert
-	owner, secret, ownerCode string
-	rooms                    []room
-	members                  map[string]*client
-	known                    map[string]knownProfile
-	waking, archive          bool
+	owner, secret, ownerKey string
+	rooms                   []room
+	members                 map[string]*client
+	known                   map[string]knownProfile
+	waking, archive         bool
 }
 
 type request struct {
 	Op         string   `json:"op"`
 	Profile    string   `json:"profile"`
+	RunNonce   string   `json:"run_nonce"`
 	Code       string   `json:"code"`
 	Codes      []string `json:"codes"`
 	Secret     string   `json:"secret"`
@@ -111,14 +112,15 @@ type request struct {
 
 type state struct {
 	advert
-	Owner      string         `json:"owner"`
-	Rooms      []room         `json:"rooms"`
-	Users      []user         `json:"users"`
-	Offline    []knownProfile `json:"offline,omitempty"`
-	Text       string         `json:"text_room"`
-	Indicators bool           `json:"voice_indicators"`
-	Voice      string         `json:"voice"`
-	Archive    bool           `json:"archive"`
+	Owner        string         `json:"owner"`
+	Rooms        []room         `json:"rooms"`
+	Users        []user         `json:"users"`
+	Offline      []knownProfile `json:"offline,omitempty"`
+	Text         string         `json:"text_room"`
+	Indicators   bool           `json:"voice_indicators"`
+	RenameServer bool           `json:"server_rename"`
+	Voice        string         `json:"voice"`
+	Archive      bool           `json:"archive"`
 }
 
 type response struct {
@@ -174,6 +176,17 @@ func profileCode(secret string) string {
 		return ""
 	}
 	return shortCode("TinySpeak profile code v1:", secret)
+}
+
+func runProfileCode(secret, nonce string) string {
+	// Earlier clients retain their previous code.
+	if nonce == "" {
+		return profileCode(secret)
+	}
+	if !validID(secret, 40) || !validID(nonce, 40) {
+		return ""
+	}
+	return shortCode("TinySpeak profile run v1:", secret+":"+nonce)
 }
 
 func shortCode(domain, secret string) string {
@@ -242,7 +255,7 @@ func (s *service) snapshot(c *client) *state {
 	if srv == nil {
 		return nil
 	}
-	result := &state{advert: srv.advert, Owner: srv.owner, Voice: c.Voice, Text: c.textID, Indicators: true, Offline: srv.offline(), Archive: srv.archive,
+	result := &state{advert: srv.advert, Owner: srv.owner, Voice: c.Voice, Text: c.textID, Indicators: true, RenameServer: true, Offline: srv.offline(), Archive: srv.archive,
 		Rooms: append([]room{}, srv.rooms...), Users: make([]user, 0, len(srv.members))}
 	for _, member := range srv.members {
 		result.Users = append(result.Users, member.user)
@@ -370,7 +383,7 @@ func (s *service) command(c *client, q request) response {
 			if len(s.servers) >= 8192 {
 				return fail("The relay is at capacity.")
 			}
-			srv = &server{advert: advert{q.Code, name}, owner: c.ID, ownerCode: c.ProfileCode, secret: q.Secret, members: map[string]*client{}}
+			srv = &server{advert: advert{q.Code, name}, owner: c.ID, ownerKey: c.memberKey, secret: q.Secret, members: map[string]*client{}}
 			s.servers[q.Code] = srv
 			if q.Archive {
 				s.loadRoster(srv)
@@ -395,7 +408,7 @@ func (s *service) command(c *client, q request) response {
 		if nameTaken(srv, c.Name, c.ID) {
 			return fail("That username is already in use on this server.")
 		}
-		if c.ProfileCode != "" && srv.hasOnline(c.ProfileCode) {
+		if c.memberKey != "" && srv.hasOnline(c.memberKey) {
 			return fail("This profile is already online in this server.")
 		}
 		if !srv.hasSpace(c) {
@@ -425,6 +438,12 @@ func (s *service) command(c *client, q request) response {
 			return fail("The rooms could not be loaded.")
 		}
 		if srv.rooms == nil {
+			// Layouts saved by Patch 17 may contain a text-room capacity.
+			for i := range q.Rooms {
+				if q.Rooms[i].Kind == "text" {
+					q.Rooms[i].Limit = 0
+				}
+			}
 			srv.rooms, srv.waking = q.Rooms, false
 		}
 		return response{}
@@ -463,6 +482,19 @@ func (s *service) command(c *client, q request) response {
 	}
 	index := slices.IndexFunc(active.rooms, func(r room) bool { return r.ID == q.Room })
 	switch q.Op {
+	case "server_rename":
+		name, ok := cleanLabel(q.Name, 1, 64)
+		if active.owner != c.ID {
+			return fail("Only the owner can rename the server.")
+		}
+		if !ok {
+			return fail("Server names must be 1–64 characters.")
+		}
+		if active.Name != name {
+			active.Name = name
+			active.changed()
+		}
+		return response{State: s.snapshot(c)}
 	case "sync":
 		return response{State: s.snapshot(c)}
 	case "mic_status":
@@ -475,9 +507,6 @@ func (s *service) command(c *client, q request) response {
 		if index < 0 || active.rooms[index].Kind != "text" {
 			return fail("Select a text room.")
 		}
-		if !active.hasRoom(active.rooms[index], c) {
-			return fail("The text room is full.")
-		}
 		c.textID = q.Room
 		c.version++
 		return response{State: s.snapshot(c)}
@@ -486,26 +515,27 @@ func (s *service) command(c *client, q request) response {
 		c.version++
 		return response{State: s.snapshot(c)}
 	case "room_limit":
-		if active.owner != c.ID || index < 0 {
-			return fail("Only the owner can set a room limit.")
+		if active.owner != c.ID || index < 0 || active.rooms[index].Kind != "voice" {
+			return fail("Only the owner can set a voice room limit.")
 		}
 		if q.Limit < 1 || q.Limit > maxVoice {
 			return fail("Choose a room limit from 1 to 16.")
 		}
-		if active.occupancy(active.rooms[index], nil) > q.Limit {
+		if active.voiceOccupancy(q.Room, nil) > q.Limit {
 			return fail("More people are in this room than the selected limit. Choose a higher limit or wait for someone to leave.")
 		}
 		active.rooms[index].Limit = q.Limit
 		active.changed()
 		return response{State: s.snapshot(c)}
 	case "forget_member":
-		if active.owner != c.ID || active.hasOnline(q.Target) {
+		key := active.keyForCode(q.Target)
+		if active.owner != c.ID || (key != "" && active.hasOnline(key)) {
 			return fail("Only the owner can remove an offline member.")
 		}
-		if _, ok := active.known[q.Target]; !ok {
+		if key == "" {
 			return fail("This profile is no longer offline.")
 		}
-		delete(active.known, q.Target)
+		delete(active.known, key)
 		s.saveRoster(active)
 		active.changed()
 		return response{State: s.snapshot(c)}
@@ -523,7 +553,10 @@ func (s *service) command(c *client, q request) response {
 		if count == maxRooms {
 			return fail("The limit of 32 rooms of this type has been reached.")
 		}
-		r := room{ID: randomString(12), Name: name, Kind: q.Kind, Limit: maxVoice}
+		r := room{ID: randomString(12), Name: name, Kind: q.Kind}
+		if r.Kind == "voice" {
+			r.Limit = maxVoice
+		}
 		active.rooms = append(active.rooms, r)
 		active.changed()
 		return response{State: s.snapshot(c), Room: &r}
@@ -556,7 +589,7 @@ func (s *service) command(c *client, q request) response {
 		if index < 0 || active.rooms[index].Kind != "text" {
 			return fail("Select a text room.")
 		}
-		if c.textID != q.Room && (active.rooms[index].Limit > 0 || c.indicators) {
+		if c.textID != q.Room && c.indicators {
 			return fail("Join the text room first.")
 		}
 		body := strings.TrimSpace(q.Text)
@@ -571,13 +604,7 @@ func (s *service) command(c *client, q request) response {
 		e := event{Type: "chat", Code: c.active, Room: q.Room, Name: active.rooms[index].Name,
 			Sender: c.Name, Text: body, At: time.Now().UTC().Format(time.RFC3339)}
 		for _, member := range active.members {
-			if active.rooms[index].Limit == 0 || member.textID == q.Room {
-				member.send(e)
-			} else if member.ID == active.owner && active.archive {
-				archive := e
-				archive.Type = "archive_chat"
-				member.send(archive)
-			}
+			member.send(e)
 		}
 		if active.archive && active.members[active.owner] == nil {
 			for _, owner := range s.clients {
@@ -595,7 +622,7 @@ func (s *service) command(c *client, q request) response {
 		if s.voice.URL == "" {
 			return fail("The voice service has not been configured.")
 		}
-		if !active.hasRoom(active.rooms[index], c) {
+		if !active.hasVoiceSeat(active.rooms[index], c) {
 			return fail("The voice room is full.")
 		}
 		if c.Voice != q.Room {
@@ -628,7 +655,7 @@ func (s *service) command(c *client, q request) response {
 		if active.owner != c.ID || target == nil || target.ID == c.ID {
 			return fail("Only the owner can remove another user.")
 		}
-		delete(active.known, target.ProfileCode)
+		delete(active.known, target.memberKey)
 		s.saveRoster(active)
 		s.leave(target)
 		target.send(event{Type: "kicked", Code: q.Code})
@@ -729,7 +756,13 @@ func (s *service) handle(w http.ResponseWriter, r *http.Request) {
 			write(http.StatusOK, fail("Usernames must be 4–32 characters."))
 			return
 		}
-		c := &client{user: user{ID: randomString(24), ProfileID: profileID(q.Profile), ProfileCode: profileCode(q.Profile), micState: micState{Muted: q.Muted}, Name: name, Color: q.Color}, key: randomString(40),
+		publicCode := runProfileCode(q.Profile, q.RunNonce)
+		if q.RunNonce != "" && publicCode == "" {
+			s.mu.Unlock()
+			write(http.StatusOK, fail("Invalid profile session."))
+			return
+		}
+		c := &client{memberKey: profileCode(q.Profile), user: user{ID: randomString(24), ProfileID: profileID(q.Profile), ProfileCode: publicCode, micState: micState{Muted: q.Muted}, Name: name, Color: q.Color}, key: randomString(40),
 			seen: time.Now(), wake: make(chan struct{}, 1), invited: invited, indicators: q.Indicators}
 		s.clients[c.key] = c
 		u := c.user

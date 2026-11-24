@@ -12,9 +12,9 @@ import (
 func TestVoiceProfileSurvivesReconnectAndRename(t *testing.T) {
 	s := testService()
 	secret := randomString(40)
-	register := func(name, secret string) response {
+	register := func(name, secret, nonce string) response {
 		t.Helper()
-		body, err := json.Marshal(request{Op: "register", Name: name, Profile: secret})
+		body, err := json.Marshal(request{Op: "register", Name: name, Profile: secret, RunNonce: nonce})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -26,11 +26,14 @@ func TestVoiceProfileSurvivesReconnectAndRename(t *testing.T) {
 		}
 		return result
 	}
-	first := register("First name", secret)
+	nonce := randomString(40)
+	first := register("First name", secret, nonce)
 	updated := s.command(s.clients[first.Key], request{Op: "profile", Name: "Second name"})
-	again := register("Third name", secret)
-	other := register("Second name", randomString(40))
-	legacy := register("Legacy", "")
+	again := register("Third name", secret, nonce)
+	restarted := register("Third name", secret, randomString(40))
+	older := register("Older client", secret, "")
+	other := register("Second name", randomString(40), nonce)
+	legacy := register("Legacy", "", "")
 	if first.User.ProfileID == "" || first.User.ProfileID != updated.User.ProfileID ||
 		first.User.ProfileID != again.User.ProfileID || again.User.ID == first.User.ID {
 		t.Fatal("profile identity changed with the username or session")
@@ -38,6 +41,9 @@ func TestVoiceProfileSurvivesReconnectAndRename(t *testing.T) {
 	if !validID(first.User.ProfileCode, 16) || first.User.ProfileCode != again.User.ProfileCode || first.User.ProfileCode != updated.User.ProfileCode ||
 		first.User.ProfileCode == other.User.ProfileCode || legacy.User.ProfileCode != "" || profileCode(first.User.ProfileCode) != "" {
 		t.Fatal("public profile code was unstable, shared, or accepted as the private identity")
+	}
+	if restarted.User.ProfileCode == first.User.ProfileCode || restarted.User.ProfileID != first.User.ProfileID || older.User.ProfileCode != profileCode(secret) {
+		t.Fatal("public code failed to rotate independently of private playback identity")
 	}
 	if other.User.ProfileID == first.User.ProfileID || legacy.User.ProfileID != "" {
 		t.Fatal("independent or legacy clients shared the voice profile identity")

@@ -71,7 +71,9 @@ static std::string shortCode(const char* domain, const std::string& secret) {
 }
 
 std::string inviteCode(const std::string& secret) { return shortCode("Kanal invite v1:", secret); }
-std::string profileCode(const std::string& secret) { return shortCode("TinySpeak profile code v1:", secret); }
+std::string runProfileCode(const std::string& secret, const std::string& nonce) {
+    return shortCode("TinySpeak profile run v1:", secret + ":" + nonce);
+}
 
 namespace {
 struct HttpHandle {

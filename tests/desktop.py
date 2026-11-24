@@ -1,6 +1,7 @@
 """Run the installed URL-handler and chat-control checks on a disposable Windows runner."""
 
 import ctypes as ct
+import hashlib
 from ctypes import wintypes as wt
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -29,9 +30,11 @@ class Relay(BaseHTTPRequestHandler):
     room_actions = []
     created = {}
     layouts = {}
+    states = {}
+    revision = 0
     user = {"id": "listener", "name": "Listener", "color": 8}
-    room = {"id": "ChatRoom0001", "kind": "text", "name": "General", "limit": 16}
-    voice = {"id": "VoiceRoom001", "kind": "voice", "name": "Lounge", "limit": 16}
+    room = {"id": "ChatRoom0001", "kind": "text", "name": "General"}
+    voice = {"id": "VoiceRoom001", "kind": "voice", "name": "Lounge", "limit": 6}
 
     def log_message(self, *args):
         pass
@@ -41,7 +44,24 @@ class Relay(BaseHTTPRequestHandler):
         op = command["op"]
         response = {}
         if op == "register":
+            alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+            public = ""
+            for i in range(8):
+                source = f"TinySpeak profile run v1:{command['profile']}:{command['run_nonce']}:{i}"
+                digest = hashlib.sha256(source.encode()).digest()
+                public += "".join(alphabet[b % 62] for b in digest if b < 248)
+                if len(public) >= 16:
+                    break
+            self.user["profile_code"] = public[:16]
             response = {"key": "test-session", "user": self.user}
+        elif op == "profile":
+            self.user.update(name=command["name"], color=command["color"])
+            response = {"user": self.user}
+            if self.states:
+                current = self.states[next(reversed(self.states))]
+                current["users"][0].update(self.user)
+                response["state"] = current
+            self.room_actions.append(command)
         elif op == "advertise":
             self.created[command["code"]] = command["name"]
         elif op == "hydrate":
@@ -57,19 +77,42 @@ class Relay(BaseHTTPRequestHandler):
         elif op == "join":
             code = command["code"]
             self.joined.append(code)
-            response = {
-                "state": {"code": code, "name": "Test server", "owner": self.user["id"],
-                          "users": [self.user], "rooms": [self.room, self.voice], "text_room": self.room["id"],
-                          "offline": [{"profile_code": "PublicCode123456", "name": "Away", "color": 2}]},
-                "events": [{"type": "chat", "code": code, "room": self.room["id"], "name": "General",
-                            "at": "2026-01-01T10:00:00Z", "sender": "Speaker", "text": f"Test message {i}"}
-                           for i in range(75)],
-                "version": len(self.joined),
-            }
-        elif op in ("room_limit", "room_add"):
+            state = {"code": code, "name": "Test server", "owner": "remote-owner" if code.endswith("00000002") else self.user["id"], "server_rename": True,
+                     "users": [dict(self.user, voice=self.voice["id"])], "voice": self.voice["id"],
+                     "rooms": [self.room.copy(), self.voice.copy()], "text_room": self.room["id"],
+                     "offline": [{"profile_code": "PublicCode123456", "name": "Željko", "color": 2}]}
+            self.states[code] = state
+            response = {"state": state, "events": [
+                {"type": "chat", "code": code, "room": self.room["id"], "name": "General",
+                 "at": "2026-01-01T10:00:00Z", "sender": "Speaker", "text": f"Test message {i}"} for i in range(75)]}
+        elif op in ("room_limit", "room_add", "room_delete", "room_rename", "server_rename", "voice_leave"):
+            state = self.states[command["code"]]
+            rooms = state["rooms"]
+            if op == "room_add":
+                room = {"id": f"ExtraRoom{len(rooms):03d}", "kind": command["kind"], "name": command["name"]}
+                if room["kind"] == "voice":
+                    room["limit"] = 16
+                rooms.append(room)
+            elif op == "server_rename":
+                state["name"] = command["name"]
+            elif op == "voice_leave":
+                state["voice"] = state["users"][0]["voice"] = ""
+            else:
+                room = next(r for r in rooms if r["id"] == command["room"])
+                if op == "room_limit":
+                    assert room["kind"] == "voice"
+                    room["limit"] = command["limit"]
+                elif op == "room_rename":
+                    room["name"] = command["name"]
+                else:
+                    rooms.remove(room)
             self.room_actions.append(command)
+            response = {"state": state}
         elif op == "poll":
             time.sleep(0.1)
+        if "state" in response:
+            type(self).revision += 1
+            response["version"] = self.revision
         data = json.dumps(response).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -206,8 +249,9 @@ def choose_file(title, path):
         native(ui, "EnumChildWindows", wt.BOOL, wt.HWND, visitor, wt.LPARAM)(dialog, visit, 0)
         return matches[0] if matches else None
     field = wait_for(lambda: file_field() if visible(dialog) else None, "File name edit")
-    if title == "Export chat as TXT":
-        wait_for(lambda: "TinySpeak-chat" in get_text(field), "Suggested export name")
+    initial = {"Export chat as TXT": "TinySpeak-chat", "Export server members": "TinySpeak-members"}.get(title)
+    if initial:
+        wait_for(lambda: initial in get_text(field), "Suggested export name")
     send(field, 0x00b1, 0, -1)  # select the previous name, then type as the user would
     for char in str(path):
         send(field, 0x0102, ord(char), 0)
@@ -221,7 +265,7 @@ class MenuBarInfo(ct.Structure):
                 ("window", wt.HWND), ("flags", wt.DWORD)]
 
 
-def choose_menu(main, command, room=None):
+def choose_menu(main, command, room=None, required=(), absent=()):
     bar_info = native(ui, "GetMenuBarInfo", wt.BOOL, wt.HWND, wt.LONG, wt.LONG, ct.POINTER(MenuBarInfo))
     count = native(ui, "GetMenuItemCount", ct.c_int, wt.HANDLE)
     item_id = native(ui, "GetMenuItemID", wt.UINT, wt.HANDLE, ct.c_int)
@@ -266,7 +310,7 @@ def choose_menu(main, command, room=None):
         post(main, 0x007b, tree, -1)
         handle, menu = wait_for(popup, "Room context menu")
         commands = [item_id(menu, i) for i in range(count(menu))]
-        assert command in commands and 132 in commands
+        assert command in commands and all(n in commands for n in required) and all(n not in commands for n in absent), commands
         highlight(handle, menu, commands.index(command))
         post(handle, 0x0100, 0x0d, 0)
         return
@@ -333,34 +377,136 @@ def profile_code(main):
     return code
 
 
+def bounds(window):
+    rect = wt.RECT()
+    assert native(ui, "GetWindowRect", wt.BOOL, wt.HWND, ct.POINTER(wt.RECT))(window, ct.byref(rect))
+    return rect
+
+
+def check_sidebar(main, restoring=False):
+    tree, toggle = child(main, 107), child(main, 138)
+    setting, menu, new_server = [bounds(child(main, i)) for i in (135, 103, 101)]
+    assert setting.right <= menu.left and setting.bottom <= new_server.top and setting.left == new_server.left
+    if restoring:
+        assert not visible(tree) and get_text(toggle) == "Expand rooms"
+        send(toggle, 0x00f5, 0, 0)
+        assert visible(tree)
+        return bounds(tree).right - bounds(tree).left
+    size = bounds(tree)
+    dpi = native(ui, "GetDpiForWindow", wt.UINT, wt.HWND)(main)
+    point = wt.POINT(size.right + round(7 * dpi / 96), size.top + 8)
+    assert native(ui, "ScreenToClient", wt.BOOL, wt.HWND, ct.POINTER(wt.POINT))(main, ct.byref(point))
+    def packed(x, y):
+        return (x & 0xffff) | ((y & 0xffff) << 16)
+    send(main, 0x0201, 1, packed(point.x, point.y))
+    send(main, 0x0200, 1, packed(point.x + 46, point.y))
+    send(main, 0x0202, 0, packed(point.x + 46, point.y))
+    result = bounds(tree)
+    assert result.right - size.right >= 44
+    send(toggle, 0x00f5, 0, 0)
+    assert not visible(tree) and get_text(toggle) == "Expand rooms"
+    return result.right - result.left
+
+
 def check_rooms(main):
     tree = child(main, 107)
-    def next_item(flag, item=0):
+    def node(flag, item=0):
         return send(tree, 0x110a, flag, item)
-    texts = next_item(0)
-    voices = next_item(1, texts)
-    online = next_item(1, voices)
-    offline = next_item(1, online)
-    assert offline and next_item(4, offline) and not send(tree, 0x1127, offline, 32)
-    send(tree, 0x1102, 2, offline)  # TVM_EXPAND
-    assert send(tree, 0x1127, offline, 32)
-    for group, kind, current in [(texts, "text", Relay.room), (voices, "voice", Relay.voice)]:
-        room = next_item(4, group)
-        choose_menu(main, 114 if kind == "text" else 115, room)
-        dialog = wait_for(lambda: find("#32770", f"New {kind} room"), "New room dialog")
-        set_text(find_child(dialog, None, "Edit", None), "Another room")
+    def room(voice=False):
+        root = node(0)
+        return node(4, node(1, root) if voice else root)
+    def changed(op, **values):
+        wait_for(lambda: any(r["op"] == op and all(r.get(k) == v for k, v in values.items())
+                             for r in Relay.room_actions), op)
+    def edit(title, name):
+        dialog = wait_for(lambda: find("#32770", title), title)
+        set_text(find_child(dialog, None, "Edit", None), name)
         press(dialog, 1)
-        choose_menu(main, 132, room)
-        dialog = wait_for(lambda: find("#32770", "Room limit"), "Capacity dialog")
-        choices = find_child(dialog, None, "ComboBox", None)
-        assert choices and send(choices, 0x0146, 0, 0) == 16 and send(choices, 0x0147, 0, 0) == 15
-        send(choices, 0x014e, 2, 0)
-        press(dialog, 1)
-        wait_for(lambda: any(r["op"] == "room_add" and r["kind"] == kind and r["name"] == "Another room"
-                             for r in Relay.room_actions), "Create room command")
-        wait_for(lambda: any(r["op"] == "room_limit" and r["room"] == current["id"] and r["limit"] == 3
-                             for r in Relay.room_actions), "Room limit command")
-    send(tree, 0x110b, 9, next_item(4, texts))
+    online = node(1, node(1, node(0)))
+    assert online and not node(1, online), "Unexpected Offline tree section"
+    choose_menu(main, 104, node(4, room(True)), required=(120,), absent=(133,))
+    dialog = wait_for(lambda: find("#32770", "Username and color"), "Edit own username")
+    set_text(find_child(dialog, None, "Edit", None), "Listener 18")
+    press(dialog, 1)
+    changed("profile", name="Listener 18")
+    profile_dir = Path(os.environ.get("KANAL_DATA_PATH", Path(os.environ["LOCALAPPDATA"]) / "TinySpeak"))
+    wait_for(lambda: json.loads((profile_dir / "settings.json").read_text(encoding="utf-8")).get("name") == "Listener 18",
+             "The client saved its renamed profile")
+    choose_menu(main, 120, node(4, room(True)), absent=(133,))
+    changed("voice_leave")
+    wait_for(lambda: node(4, node(1, node(1, node(0)))), "Self moved back to Online")
+    choose_menu(main, 104, node(4, node(1, node(1, node(0)))), absent=(120, 133))
+    dialog = wait_for(lambda: find("#32770", "Username and color"), "Idle own menu")
+    assert get_text(find_child(dialog, None, "Edit", None)) == "Listener 18"
+    press(dialog, 2)
+    choose_menu(main, 114, room(), required=(116,), absent=(132,))
+    edit("New text room", "Extra text")
+    changed("room_add", kind="text", name="Extra text")
+    wait_for(lambda: node(1, room()), "New text room in tree")
+    choose_menu(main, 132, room(True), required=(115, 116))
+    dialog = wait_for(lambda: find("#32770", "Room limit"), "Voice capacity dialog")
+    choices = find_child(dialog, None, "ComboBox", None)
+    assert send(choices, 0x0146, 0, 0) == 16 and send(choices, 0x0147, 0, 0) == 5
+    send(choices, 0x014e, 2, 0)
+    press(dialog, 1)
+    changed("room_limit", room=Relay.voice["id"], limit=3)
+
+    post(child(main, 135), 0x00f5, 0, 0)
+    panel = wait_for(lambda: find("#32770", "Server settings"), "Server settings button")
+    table = child(panel, 403)
+    def click(i):
+        post(child(panel, i), 0x00f5, 0, 0)
+    def select(index):
+        send(table, 0x100, 0x24, 0)  # Home
+        for _ in range(index):
+            send(table, 0x100, 0x28, 0)
+        wait_for(lambda: send(table, 0x100c, -1, 2) == index, "Selected settings row")
+    click(404)
+    edit("Rename server", "Renamed server")
+    wait_for(lambda: get_text(child(panel, 413)) == "Renamed server", "Server rename acknowledged")
+    assert "Renamed server" in get_text(child(main, 100))
+    select(0)
+    assert not visible(child(panel, 408)), "Text room exposed a voice limit"
+    click(406)
+    edit("New voice room", "Second voice")
+    wait_for(lambda: send(table, 0x1004, 0, 0) == 4, "New voice room in settings")
+    select(1)
+    click(408)
+    dialog = wait_for(lambda: find("#32770", "Room limit"), "Voice limit from settings")
+    choice = find_child(dialog, None, "ComboBox", None)
+    assert send(choice, 0x147, 0, 0) == 2
+    send(choice, 0x14e, 15, 0)
+    press(dialog, 1)
+    changed("room_limit", room=Relay.voice["id"], limit=16)
+    click(407)
+    edit("Rename room", "Quiet lounge")
+    changed("room_rename", room=Relay.voice["id"], name="Quiet lounge")
+    select(3)
+    click(409)
+    confirm = wait_for(lambda: find("#32770", "Delete room"), "Delete room confirmation")
+    press(confirm, 6)
+    wait_for(lambda: send(table, 0x1004, 0, 0) == 3, "Deleted room disappeared")
+    click(402)
+    wait_for(lambda: visible(child(panel, 410)) and send(table, 0x1004, 0, 0) == 2, "Member directory")
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "members.txt"
+        click(410)
+        choose_file("Export server members", path)
+        wait_for(lambda: get_text(child(panel, 412)) == "Member list exported." and path.exists(), "Member TXT")
+        rows = path.read_text(encoding="utf-8-sig").splitlines()
+        assert rows[0] == "Username\tProfile ID"
+        assert set(rows[1:]) == {f"{Relay.user['name']}\t{Relay.user['profile_code']}", "Željko\tPublicCode123456"}
+    press(panel, 2)
+
+
+def check_guest_settings(main):
+    post(child(main, 135), 0x00f5, 0, 0)
+    panel = wait_for(lambda: find("#32770", "Server settings"), "Member access to server settings")
+    wait_for(lambda: visible(child(panel, 410)), "Member directory opens for a guest")
+    assert not visible(child(panel, 404)) and not visible(child(panel, 411))
+    send(child(panel, 401), 0x00f5, 0, 0)
+    assert all(not visible(child(panel, i)) for i in (405, 406, 407, 408, 409))
+    press(panel, 2)
 
 
 def inspect_history(main):
@@ -408,6 +554,8 @@ def test(client):
             assert winreg.QueryValueEx(key, None)[0] == f'"{client}" --join-uri "%1"'
         main = window()
         initial_code = profile_code(main)
+        wait_for(lambda: Relay.user.get("profile_code") == initial_code, "Public code agrees with host")
+        sidebar_width = check_sidebar(main)
         check_settings(main, True)
         set_slider(main, child(main, 122), 28)  # 120%
         set_slider(main, child(main, 123), 20)  # 80%
@@ -415,14 +563,16 @@ def test(client):
         settings = json.loads(profile.read_text(encoding="utf-8"))
         assert (settings["mic_gain"], settings["output_gain"], settings["mic_muted"]) == (120, 80, False)
         assert settings["normalization_percent"] == 75 and settings["voice_bitrate_kbps"] == 128
-        assert settings["ptt"] == ord("V") and not settings["offline_expanded"]
+        assert settings["ptt"] == ord("V") and settings["sidebar_collapsed"] and settings["sidebar_width_dip"] > 0
         assert send(main, 0x0011, 0, 0) == 1  # WM_QUERYENDSESSION, followed by confirmed Windows shutdown
         post(main, 0x0016, 1, 0)
         assert first.wait(15) == 0
         assert open_url(None, "open", prefix + codes[0], None, None, 1) > 32
         wait_for(lambda: Relay.joined == codes[:1], "Cold link did not join its server")
         main = wait_for(window, "Cold link did not open TinySpeak")
-        assert profile_code(main) == initial_code
+        current_code = profile_code(main)
+        assert current_code != initial_code and current_code == Relay.user["profile_code"]
+        assert abs(check_sidebar(main, restoring=True) - sidebar_width) <= 1
         check_settings(main, False)
         pid = wt.DWORD()
         window_thread(main, ct.byref(pid))
@@ -431,6 +581,8 @@ def test(client):
         warm_pid = wt.DWORD()
         window_thread(window(), ct.byref(warm_pid))
         assert pid.value == warm_pid.value and window() == main
+        wait_for(lambda: codes[1] in get_text(child(main, 100)), "Guest server became active")
+        check_guest_settings(main)
         paste_into_join(main, prefix + codes[2])
         paste_into_join(main, codes[2])
         wait_for(lambda: len(Relay.joined) >= 3, "Manual invite code did not join")
@@ -443,6 +595,7 @@ def test(client):
             wait_for(lambda: not visible(main) and not child(main, 108), "Close did not unload the view into the tray")
             subprocess.run([client.parent / "Launch TinySpeak.exe"], timeout=10, check=True)
             wait_for(lambda: visible(main) and child(main, 108), "Shortcut did not restore the tray session")
+            assert profile_code(main) == current_code
             assert get_text(child(main, 109)) == "x" and "Test message 74" in get_text(child(main, 108))
         assert Relay.joined == codes, "The Join box also accepted the URL"
         assert subprocess.run([client, "--join-uri", prefix + codes[0] + "?unexpected"], timeout=10).returncode == 2
@@ -452,7 +605,7 @@ def test(client):
         press(dialog, 1)
         wait_for(lambda: Relay.layouts, "The owner did not load the new server layout")
         rooms = next(iter(Relay.layouts.values()))
-        assert [(r["kind"], r["name"], r["limit"]) for r in rooms] == [("text", "General", 16), ("voice", "Lounge", 16)]
+        assert [(r["kind"], r["name"], r.get("limit", 0)) for r in rooms] == [("text", "General", 0), ("voice", "Lounge", 16)]
     finally:
         close_window()
 

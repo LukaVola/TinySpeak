@@ -4,6 +4,7 @@
 #include "network.h"
 
 #include <commctrl.h>
+#include <commdlg.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
 #include <algorithm>
@@ -86,6 +87,19 @@ void drawButton(const DRAWITEMSTRUCT& item, bool dropdown, const std::wstring& t
             flags | (dropdown ? DT_LEFT : DT_CENTER));
     }
     SelectObject(dc, previousFont);
+}
+
+void drawRoomsToggle(const DRAWITEMSTRUCT& item, bool collapsed) {
+    const auto box = buttonSurface(item);
+    const int dpi = GetDpiForWindow(item.hwndItem);
+    const int x = (box.left + box.right) / 2, y = (box.top + box.bottom) / 2;
+    const int d = MulDiv(4, dpi, 96), h = collapsed ? d : -d;
+    auto pen = CreatePen(PS_SOLID, std::max(1, MulDiv(2, dpi, 96)), theme::secondary);
+    auto old = SelectObject(item.hDC, pen);
+    const POINT points[]{{x - h / 2, y - d}, {x + h / 2, y}, {x - h / 2, y + d}};
+    Polyline(item.hDC, points, 3);
+    SelectObject(item.hDC, old);
+    DeleteObject(pen);
 }
 
 void drawMicrophoneButton(const DRAWITEMSTRUCT& item, bool muted) {
@@ -259,16 +273,6 @@ LRESULT CALLBACK darkCheck(HWND box, UINT message, WPARAM w, LPARAM l, UINT_PTR,
         message == WM_LBUTTONUP || message == WM_KEYUP) InvalidateRect(box, nullptr, FALSE);
     return result;
 }
-
-struct EmptyDialog {
-    alignas(DWORD) DLGTEMPLATE dialog{};
-    WORD menu = 0, klass = 0, caption = 0;
-    EmptyDialog(short width, short height) {
-        dialog.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_CENTER;
-        dialog.cx = width;
-        dialog.cy = height;
-    }
-};
 
 struct LogPages {
     static constexpr std::streamoff pageSize = 256 * 1024;
@@ -569,6 +573,20 @@ struct Form {
         return TRUE;
     }
 };
+}
+
+std::filesystem::path chooseTextExport(HWND parent, const wchar_t* title, const wchar_t* filename) {
+    wchar_t path[32768]{};
+    lstrcpynW(path, filename, ARRAYSIZE(path));
+    OPENFILENAMEW dialog{sizeof(dialog)};
+    dialog.hwndOwner = parent;
+    dialog.lpstrFilter = L"Text file (*.txt)\0*.txt\0\0";
+    dialog.lpstrFile = path;
+    dialog.nMaxFile = ARRAYSIZE(path);
+    dialog.lpstrDefExt = L"txt";
+    dialog.lpstrTitle = title;
+    dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    return GetSaveFileNameW(&dialog) ? std::filesystem::path(path) : std::filesystem::path{};
 }
 
 bool form(HWND owner, const wchar_t* title, std::vector<Field>& fields) {
