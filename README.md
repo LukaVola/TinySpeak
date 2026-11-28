@@ -1,8 +1,14 @@
-# TinySpeak
+# <img src="TinySpeak.png" width="40" height="40" alt="TinySpeak microphone icon"> TinySpeak
 
-TinySpeak is a portable voice and text chat app for small groups on 64-bit Windows. Your PC hosts the server while TinySpeak is open. You and your friends only need a username and an invite.
+TinySpeak is a lightweight, privacy-focused voice and text chat app for friends and small groups of people you trust. It runs on 64-bit Windows and hosts your server on your own PC. You join with a username and an invite, and any chat history you choose to keep is stored locally.
 
-**[Download Patch 19 for Windows x64 (ZIP)](https://github.com/LukaVola/TinySpeak/releases/download/patch-19/TinySpeak-Windows-x64.zip)**
+TinySpeak is designed for fast, stable conversations on older, low-spec PCs. An Intel Core i3-6100 with 2 GB of RAM is a design target for everyday use in small groups.
+
+**AI disclosure.** AI tools were used for a substantial part of this project, including building the user interface and optimizing the app to keep CPU and memory use low.
+
+> **Share invites only with people you trust.** TinySpeak connects devices directly over the Internet when possible. On a direct connection, peers can see each other's public IP addresses. Anyone with a working invite can try to join, so send invites privately and avoid posting them in public channels or forums.
+
+**[Download Patch 20 for Windows x64 (ZIP)](https://github.com/LukaVola/TinySpeak/releases/download/patch-20/TinySpeak-Windows-x64.zip)**
 
 ## Start a conversation
 

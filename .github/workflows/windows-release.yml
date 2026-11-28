@@ -72,10 +72,10 @@ jobs:
           foreach ($file in 'msvcp140.dll','msvcp140_atomic_wait.dll','vcruntime140.dll','vcruntime140_1.dll') {
             Copy-Item -LiteralPath (Join-Path $crt.FullName $file) -Destination $app
           }
-          Copy-Item README.md,Licenses -Recurse -Destination $app
+          Copy-Item README.md,TinySpeak.png,Licenses -Recurse -Destination $app
           $asset = "$env:RUNNER_TEMP/TinySpeak-Windows-x64.zip"
           [IO.Compression.ZipFile]::CreateFromDirectory($app.FullName,$asset,[IO.Compression.CompressionLevel]::Optimal,$true)
-          $notes = 'Extract the whole ZIP and open **Launch TinySpeak.exe** once. Paste a **Copy invite code** in **Join**, or click a **Copy invite link** to open TinySpeak and join the server. Double-click a voice room to talk. Find **Export chat as TXT…** and **Open chat TXT…** under **Menu → Chat logs**. Open **Server settings** to manage rooms and view or export the member list. Text rooms have no individual capacity. Voice limits below 16 appear beside the room. Drag the sidebar divider to change its width, or collapse it with the arrow. The profile shows your public code as plain text. TinySpeak generates a new one after a full restart.'
+          $notes = 'The README explains the privacy and resource-use goals for TinySpeak and discloses the use of AI in development. Share server invites only with people you trust. A direct connection can reveal your public IP address to other peers. Extract the whole ZIP and open **Launch TinySpeak.exe** to get started.'
           $notesFile = "$env:RUNNER_TEMP/patch-notes.md"
           $notes | Set-Content -Encoding utf8 $notesFile
           gh release create $tag $asset --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --prerelease --title $version --notes-file $notesFile
