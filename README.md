@@ -2,7 +2,7 @@
 
 TinySpeak is a lightweight, privacy-focused voice and text chat app for friends and small groups of people you trust. It runs on 64-bit Windows and hosts your server on your own PC. You join with a username and an invite, and any chat history you choose to keep is stored locally.
 
-TinySpeak is designed for fast, stable conversations on older, low-spec PCs. An Intel Core i3-6100 with 2 GB of RAM is a design target for everyday use in small groups.
+TinySpeak is designed for fast, stable conversations on older, low-spec PCs. In a three-computer voice call tested by the project owner, TinySpeak ran smoothly on a PC with an Intel Core i3-6100 and 2 GB of RAM.
 
 **AI disclosure.** AI tools were used for a substantial part of this project, including building the user interface and optimizing the app to keep CPU and memory use low.
 
